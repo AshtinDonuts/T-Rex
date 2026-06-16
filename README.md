@@ -43,7 +43,7 @@ overlook or capture only with static tactile encoders.
 ### Highlights
 
 - **100-hour tactile-reactive dataset**, collected with a data-efficient recipe that
-  prioritizes elementary motor primitives (22 primitives, 200+ objects, 5400+
+  prioritizes elementary motor primitives (22 primitives, 200+ objects, 7700+
   trajectories); **~50 hours open-sourced** in [LeRobot v3.0](#lerobot-v30-data-path-opt-in) format.
 - **Asynchronous Mixture-of-Transformers (MoT)** on a Qwen3-VL-2B backbone:
   *latent* (reason), *action*, and *tactile* experts running at different rates —
