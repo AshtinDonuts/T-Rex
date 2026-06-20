@@ -35,3 +35,4 @@ tactile_vqvae/logs/
 tactile_vqvae/plots*/
 training_data/
 checkpoints/
+episode_viz/
