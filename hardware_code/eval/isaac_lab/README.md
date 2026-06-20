@@ -17,8 +17,11 @@ hardware_code/eval/isaac_lab/prepare_asset.sh
 ```
 
 Set `ISAACLAB_ROOT` if Isaac Lab is elsewhere. The script builds a combined
-URDF with absolute mesh paths, checks in neither generated meshes nor copied
-third-party assets, and converts it to a fixed-base USD.
+URDF with absolute mesh paths, swaps Vega `.glb` visuals for renderable `.obj`
+meshes (Isaac Sim's URDF importer skips GLB visuals), checks in neither generated
+meshes nor copied third-party assets, and converts it to a fixed-base USD.
+Run it again after changing the hand mount transforms or source URDFs; it removes
+the stale converted USD before importing the rebuilt asset.
 
 ## 2. Start T-Rex inference
 
