@@ -8,7 +8,8 @@ USD_DIR="$SCRIPT_DIR/generated/usd"
 
 python3 "$SCRIPT_DIR/build_wave_vega_urdf.py" --output "$URDF"
 mkdir -p "$USD_DIR"
-"$ISAACLAB_ROOT/isaaclab.sh" -p "$ISAACLAB_ROOT/scripts/tools/convert_urdf.py" \
+env -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u VIRTUAL_ENV \
+  "$ISAACLAB_ROOT/isaaclab.sh" -p "$ISAACLAB_ROOT/scripts/tools/convert_urdf.py" \
   "$URDF" "$USD_DIR" --fix-base --joint-stiffness 400 --joint-damping 40 --viz none
 
 echo "Prepared Isaac asset under: $USD_DIR"

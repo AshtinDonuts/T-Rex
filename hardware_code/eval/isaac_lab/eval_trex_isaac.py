@@ -100,8 +100,8 @@ def set_named_positions(robot: Articulation, mapping: dict[str, float]) -> None:
     positions = robot.data.default_joint_pos.torch.clone()
     for name, value in mapping.items():
         positions[:, exact_ids(robot, [name])[0]] = value
-    robot.write_joint_position_to_sim_index(positions)
-    robot.set_joint_position_target_index(positions)
+    robot.write_joint_position_to_sim_index(position=positions)
+    robot.set_joint_position_target_index(target=positions)
 
 
 def camera_rgb(camera: Camera) -> np.ndarray:
@@ -210,6 +210,13 @@ def main() -> None:
 
     if args_cli.dry_run:
         print("Scene and three RGB cameras initialized successfully.")
+        if not app_launcher._headless:
+            while simulation_app.is_running():
+                robot.write_data_to_sim()
+                sim.step()
+                robot.update(sim_cfg["dt"])
+                for camera in cameras.values():
+                    camera.update(sim_cfg["dt"])
         return
 
     context = zmq.Context()
@@ -266,10 +273,10 @@ def main() -> None:
                               sim_cfg["ik_damping"], sim_cfg["ik_step_scale"])
             right_q = dls_step(robot, right_arm_ids, right_ee_id, right_target_pos, right_target_quat,
                                sim_cfg["ik_damping"], sim_cfg["ik_step_scale"])
-            robot.set_joint_position_target_index(left_q, joint_ids=left_arm_ids)
-            robot.set_joint_position_target_index(right_q, joint_ids=right_arm_ids)
-            robot.set_joint_position_target_index(action[:, 9:31], joint_ids=left_hand_ids)
-            robot.set_joint_position_target_index(action[:, 40:62], joint_ids=right_hand_ids)
+            robot.set_joint_position_target_index(target=left_q, joint_ids=left_arm_ids)
+            robot.set_joint_position_target_index(target=right_q, joint_ids=right_arm_ids)
+            robot.set_joint_position_target_index(target=action[:, 9:31], joint_ids=left_hand_ids)
+            robot.set_joint_position_target_index(target=action[:, 40:62], joint_ids=right_hand_ids)
             robot.write_data_to_sim()
             sim.step()
             robot.update(sim_cfg["dt"])
@@ -286,5 +293,10 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        raise
     finally:
         simulation_app.close()

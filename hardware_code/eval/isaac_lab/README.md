@@ -42,6 +42,10 @@ server therefore returns a full action-expert chunk for `mode="slow"`.
 
 ## 3. Run the simulation
 
+Isaac Lab runs under Isaac Sim's bundled Python (3.12), not the T-Rex training
+conda env. The helper scripts unset `CONDA_PREFIX` automatically so you can
+keep the inference server running in `(trex)` in another terminal.
+
 First verify the asset, joint mapping, and cameras without the checkpoint:
 
 ```bash

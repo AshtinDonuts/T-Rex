@@ -1,23 +1,15 @@
-<div align="center">
-
 # 🦖T-Rex: Tactile-Reactive Dexterous Manipulation
 
-![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
-![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=for-the-badge&logo=PyTorch&logoColor=white)
+Python
+PyTorch
 
-[🌐 **Project Page**](https://tactile-rex.github.io/) | [✍️ **Paper (arXiv)**](https://arxiv.org/abs/2606.17055) | [🤗 **Model**](#-model-zoo) | [🤗 **Dataset (Hugging Face)**](https://huggingface.co/datasets/zekaiwang/trex_dataset)
+[🌐 **Project Page](https://tactile-rex.github.io/)** | [✍️ **Paper (arXiv)](https://arxiv.org/abs/2606.17055)** | [🤗 **Model](#-model-zoo)** | [🤗 **Dataset (Hugging Face)](https://huggingface.co/datasets/zekaiwang/trex_dataset)**
 
-Dantong Niu<sup>1,2*</sup>, Zhuoyang Liu<sup>1*</sup>, Zekai Wang<sup>1*</sup>, Boning Shao<sup>1</sup>, Zhao-Heng Yin<sup>1</sup>, Anirudh Pai<sup>1</sup>, Yuvan Sharma<sup>1</sup>, Stefano Saravalle<sup>5</sup>, Ruijie Zheng<sup>2</sup>, Jing Wang<sup>2</sup>, Ryan Punamiya<sup>2</sup>, Mengda Xu<sup>2</sup>, Yuqi Xie<sup>2</sup>, Yunfan Jiang<sup>2,3</sup>, Letian Fu<sup>1</sup>, Konstantinos Kallidromitis<sup>4</sup>, Matteo Gioia<sup>5,6</sup>, Junyi Zhang<sup>1</sup>, Jiaxin Ge<sup>1</sup>, Haiwen Feng<sup>1</sup>, Fabio Galasso<sup>5,6</sup>, Wei Zhan<sup>1</sup>, David M. Chan<sup>1</sup>, Yutong Bai<sup>1</sup>, Roei Herzig<sup>1</sup>, Jiahui Lei<sup>1</sup>, Fei-Fei Li<sup>3</sup>, Ken Goldberg<sup>1</sup>, Jitendra Malik<sup>1</sup>, Pieter Abbeel<sup>1</sup>, Yuke Zhu<sup>2</sup>, Danfei Xu<sup>2</sup>, Jim (Linxi) Fan<sup>2</sup>, Trevor Darrell<sup>1</sup>
+Dantong Niu1,2*, Zhuoyang Liu1*, Zekai Wang1*, Boning Shao1, Zhao-Heng Yin1, Anirudh Pai1, Yuvan Sharma1, Stefano Saravalle5, Ruijie Zheng2, Jing Wang2, Ryan Punamiya2, Mengda Xu2, Yuqi Xie2, Yunfan Jiang2,3, Letian Fu1, Konstantinos Kallidromitis4, Matteo Gioia5,6, Junyi Zhang1, Jiaxin Ge1, Haiwen Feng1, Fabio Galasso5,6, Wei Zhan1, David M. Chan1, Yutong Bai1, Roei Herzig1, Jiahui Lei1, Fei-Fei Li3, Ken Goldberg1, Jitendra Malik1, Pieter Abbeel1, Yuke Zhu2, Danfei Xu2, Jim (Linxi) Fan2, Trevor Darrell1
 
-<sup>1</sup>UC Berkeley &nbsp;&nbsp; <sup>2</sup>NVIDIA &nbsp;&nbsp; <sup>3</sup>Stanford &nbsp;&nbsp; <sup>4</sup>Panasonic &nbsp;&nbsp; <sup>5</sup>La Sapienza University &nbsp;&nbsp; <sup>6</sup>ItalAI
+1UC Berkeley    2NVIDIA    3Stanford    4Panasonic    5La Sapienza University    6ItalAI
 
-<sup>*</sup>Equal Contribution
-
-</div>
-
-<p align="center">
-  <img src="asset/teaser.png" width="95%">
-</p>
+*Equal Contribution
 
 **T-Rex pushes the frontier of *tactile-reactive* dexterous manipulation** —
 reacting dynamically to high-frequency touch, which contemporary VLAs typically
@@ -43,17 +35,17 @@ overlook or capture only with static tactile encoders.
 ### Highlights
 
 - **100-hour tactile-reactive dataset**, collected with a data-efficient recipe that
-  prioritizes elementary motor primitives (22 primitives, 200+ objects, 7700+
-  trajectories); **~50 hours open-sourced** in [LeRobot v3.0](#lerobot-v30-data-path-opt-in) format.
+prioritizes elementary motor primitives (22 primitives, 200+ objects, 7700+
+trajectories); **~50 hours open-sourced** in [LeRobot v3.0](#lerobot-v30-data-path-opt-in) format.
 - **Asynchronous Mixture-of-Transformers (MoT)** on a Qwen3-VL-2B backbone:
-  *latent* (reason), *action*, and *tactile* experts running at different rates —
-  slow action denoising (~5 Hz) and fast tactile refinement (~20 Hz) — coupled by
-  **cascaded flow matching** so the policy reacts to contact *within* an action
-  chunk without re-running the vision stack.
+*latent* (reason), *action*, and *tactile* experts running at different rates —
+slow action denoising (~~5 Hz) and fast tactile refinement (~~20 Hz) — coupled by
+**cascaded flow matching** so the policy reacts to contact *within* an action
+chunk without re-running the vision stack.
 - **Temporal tactile VQ-VAE** that tokenizes high-frequency force/deformation over
-  time; embedded in the model and encoded on the fly (no offline code baking).
+time; embedded in the model and encoded on the fly (no offline code baking).
 - **> 30% higher average success** than the strongest baseline across 12
-  contact-rich tasks (delicate force control, deformable-object manipulation).
+contact-rich tasks (delicate force control, deformable-object manipulation).
 
 The full method trains in three stages — large-scale tactile-free **pretrain** →
 tactile-reactive **midtrain** → task-specific **post-train**.
@@ -61,17 +53,19 @@ tactile-reactive **midtrain** → task-specific **post-train**.
 > **This (`main`) branch ships the post-training + inference code only.** We
 > release the **pretrained and midtrained checkpoints** (below), so you start
 > directly at post-training and fine-tune on your own task. The pretraining /
-> midtraining code lives in the [`full-pipeline`](../../tree/full-pipeline) branch;
+> midtraining code lives in the `[full-pipeline](../../tree/full-pipeline)` branch;
 > the pretrain/midtrain corpora are not part of this release.
 
 ## 🤗 Model Zoo
 
 Checkpoints released on the Hugging Face Hub:
 
-| Checkpoint | Stage | Notes |
-|---|---|---|
-| [`miniFranka/T-Rex_pretrain_mecka22k_epoch1`](https://huggingface.co/miniFranka/T-Rex_pretrain_mecka22k_epoch1) | Pretrain | VLM-action alignment on ~22k tactile-free episodes (1 epoch); action + latent experts. |
-| [`miniFranka/T-Rex_midtrain_mecka23k_ucb100_vqvae_epoch6`](https://huggingface.co/miniFranka/T-Rex_midtrain_mecka23k_ucb100_vqvae_epoch6) | Midtrain | Tactile-reactive (cascaded flow + embedded VQ-VAE), 6 epochs. **Start here to fine-tune on your own task** (set as `RESUME_CHECKPOINT` for `scripts/train.sh`). |
+
+| Checkpoint                                                                                                                                | Stage    | Notes                                                                                                                                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[miniFranka/T-Rex_pretrain_mecka22k_epoch1](https://huggingface.co/miniFranka/T-Rex_pretrain_mecka22k_epoch1)`                           | Pretrain | VLM-action alignment on ~22k tactile-free episodes (1 epoch); action + latent experts.                                                                          |
+| `[miniFranka/T-Rex_midtrain_mecka23k_ucb100_vqvae_epoch6](https://huggingface.co/miniFranka/T-Rex_midtrain_mecka23k_ucb100_vqvae_epoch6)` | Midtrain | Tactile-reactive (cascaded flow + embedded VQ-VAE), 6 epochs. **Start here to fine-tune on your own task** (set as `RESUME_CHECKPOINT` for `scripts/train.sh`). |
+
 
 The midtrain checkpoint embeds the tactile VQ-VAE, so post-train auto-detects it
 (no separate `VQVAE_CKPT` needed) and encodes tactile codes on the fly.
@@ -83,29 +77,25 @@ objects) on a bimanual Dexmate Vega-1 with two Sharpa Wave dexterous hands — i
 [LeRobotDataset v3.0](https://github.com/huggingface/lerobot) on the
 [🤗 Hub](https://huggingface.co/datasets/zekaiwang/trex_dataset). The dataset contains head, left wrist, and right wrist RGB videos; state and action stored as current and target joint positions; 10 per-fingertip image-based tactile sensor raw grayscale images, estimated deform maps, and estimated 6-dimensional wrenches. 
 
-<p align="center">
-  <img src="asset/dataset_overview.png" width="95%">
-  <br>
-  <em>One episode from each of 20 motor primitives (head-camera view, cropped to the workspace), each with a different object.</em>
-</p>
+*One episode from each of 20 motor primitives (head-camera view, cropped to the workspace), each with a different object.*
 
-[**`dataset_quickstart/`**](dataset_quickstart/README.md) is a standalone companion to **browse, inspect, and replay** the dataset *without*
+`**[dataset_quickstart/](dataset_quickstart/README.md)`** is a standalone companion to **browse, inspect, and replay** the dataset *without*
 downloading the whole thing: a Colab-friendly notebook, per-episode selective download, and 3D
-replay on the real URDFs. See [`dataset_quickstart/README.md`](dataset_quickstart/README.md) for the
+replay on the real URDFs. See `[dataset_quickstart/README.md](dataset_quickstart/README.md)` for the
 full per-feature schema and installation (including the third-party URDF setup).
 
 Try the quickstart notebook in your browser:
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ZhuoyangLiu2005/T-Rex/blob/main/dataset_quickstart/quickstart.ipynb)
+[Open In Colab](https://colab.research.google.com/github/ZhuoyangLiu2005/T-Rex/blob/main/dataset_quickstart/quickstart.ipynb)
 
 ## Hardware & teleoperation stack
 
-[**`hardware_code/`**](hardware_code/README.md) is the complete data-collection stack that
+`**[hardware_code/](hardware_code/README.md)`** is the complete data-collection stack that
 recorded T-Rex: Manus glove + VIVE tracker teleoperation of the bimanual Vega-1 with whole-arm
 IK and collision avoidance, camera/tactile streaming, and synchronized episode recording
 (HDF5 + MP4 + losslessly compressed tactile videos), plus the robot-side
 inference client for the slow/fast protocol server
-([`hardware_code/eval/`](hardware_code/eval/README.md)). See
-[`hardware_code/README.md`](hardware_code/README.md) for the system diagram, hardware
+(`[hardware_code/eval/](hardware_code/eval/README.md)`). See
+`[hardware_code/README.md](hardware_code/README.md)` for the system diagram, hardware
 requirements, installation (uv/conda), and the step-by-step launch guide.
 
 ## Repository layout
@@ -140,7 +130,7 @@ T-Rex/
 
 > Pretraining/midtraining scripts (`pretrain.*`, `midtrain.*`,
 > `prepare_midtrain_merged.py`, `convert_egodex_to_lerobot.*`) live in the
-> [`full-pipeline`](../../tree/full-pipeline) branch.
+> `[full-pipeline](../../tree/full-pipeline)` branch.
 
 ## Install
 
@@ -165,10 +155,12 @@ globally.
 Fine-tune the released **midtrain** checkpoint on your own task, then serve it.
 Edit the path variables at the top of each `.sh`, then run it.
 
-| Step | Script | Key vars to set (top of script) | What it does |
-|---|---|---|---|
+
+| Step           | Script             | Key vars to set (top of script)                                                                  | What it does                                                                                                                                                                                                                                                                                  |
+| -------------- | ------------------ | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Post-train** | `scripts/train.sh` | `DATA_JSON` (or `LEROBOT_ROOT`), `ORIGIN_MODEL_PATH`, `DEFORM_ENCODER_PATH`, `RESUME_CHECKPOINT` | Task-specific fine-tune on a small JSON or LeRobot dataset, resuming from the released midtrain checkpoint. Tactile codes are encoded on the fly; the embedded VQ-VAE is auto-detected from the checkpoint (no `VQVAE_CKPT` needed). `RESUME_SOURCE=midtrain` keeps the tactile expert as-is. |
-| **Inference** | `scripts/test.sh` | `MODEL_PATH` | ZMQ REP server speaking the slow/fast cascaded protocol. Auto-detects architecture + embedded VQ-VAE from the checkpoint's `training_args.json`. |
+| **Inference**  | `scripts/test.sh`  | `MODEL_PATH`                                                                                     | ZMQ REP server speaking the slow/fast cascaded protocol. Auto-detects architecture + embedded VQ-VAE from the checkpoint's `training_args.json`.                                                                                                                                              |
+
 
 Each `.sh` is a plain script: paths are direct variable assignments at the top,
 the conda env + exports are in the header, and the launch command follows. Only
@@ -190,7 +182,7 @@ and is the cleanest "without tactile expert" baseline.
 
 The robot-side client that drives this server on the real Vega-1 (REQ socket,
 slow every chunk start, tactile-only fast ticks in between) is
-[`hardware_code/eval/eval_trex_async.py`](hardware_code/eval/README.md).
+`[hardware_code/eval/eval_trex_async.py](hardware_code/eval/README.md)`.
 
 ## Data preparation (your own task data)
 
@@ -198,8 +190,9 @@ Post-training runs on **your own task episodes**; T-Rex's pretrain/midtrain
 corpora are not part of this release. Bring raw episodes laid out as
 `<root>/success/episode_*/` (each: a `.h5` + 3 `.mp4` — head + left/right wrist)
 and convert them to one of two formats, selected by `--data_format`:
-- **`json`** (default) — a per-task training JSON. See [JSON data path](#json-data-path).
-- **`lerobot`** (opt-in) — a LeRobot v3.0 dataset directory. See below.
+
+- `**json`** (default) — a per-task training JSON. See [JSON data path](#json-data-path).
+- `**lerobot`** (opt-in) — a LeRobot v3.0 dataset directory. See below.
 
 Either way, tactile codes are encoded on the fly (embedded VQ-VAE), so no code
 pre-baking is required — see the **VQ-VAE tactile codes** section below.
@@ -369,7 +362,7 @@ header (or your shell).
 
 ## License
 
-Released under the **MIT License** — see the [`LICENSE`](LICENSE) file at the repo root.
+Released under the **MIT License** — see the `[LICENSE](LICENSE)` file at the repo root.
 
 ## Citation
 
@@ -386,4 +379,4 @@ If you find T-Rex useful, please cite:
   url={https://arxiv.org/abs/2606.17055}, 
 }
 ```
-<!-- TODO: replace the title / author / arXiv id above with the real values. -->
+
