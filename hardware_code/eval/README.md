@@ -57,3 +57,10 @@ policy head differs.
 The observation order (proprio → images → tactile-from-buffer) deliberately
 matches `main_teleop.py`'s recording order so inference-time inputs are
 consistent with the training data.
+
+## Isaac Lab simulation
+
+An RGB + proprioception checkpoint smoke-test client is available under
+[`isaac_lab/`](isaac_lab/README.md). It assembles the Vega-1 with the bundled
+22-DoF Sharpa Wave models, connects to the same ZMQ server, and runs the 62-D
+policy closed-loop with tactile refinement disabled.

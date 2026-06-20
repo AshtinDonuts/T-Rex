@@ -52,7 +52,6 @@ vega_1u_f5d6_urdf = robots.humanoid.vega_1u.vega_1u_f5d6.urdf
 # Access SRDF and collision URDFs
 vega_1_srdf = robots.humanoid.vega_1.vega_1.srdf
 vega_1_collision = robots.humanoid.vega_1.vega_1.collision_spheres_urdf
-
 # Load into your favorite simulator
 load_robot(vega_1_f5d6_urdf)
 ```

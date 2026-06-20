@@ -1,0 +1,62 @@
+asset:
+  usd_path: generated/usd/vega_1_sharpa_wave/vega_1_sharpa_wave.usda
+  prim_path: /World/Robot
+
+inference:
+  server_address: tcp://localhost:5678
+  task_description: "Pick up the object."
+  chunk_size: 16
+  execute_steps_per_chunk: 16
+  max_steps: 256
+  use_tactile_refine: false
+  request_timeout_ms: 120000
+  head_crop_box: [0, 300, 140, 540]
+
+simulation:
+  dt: 0.0166666667
+  render_interval: 1
+  table_height: 0.76
+  settle_steps: 60
+  ik_damping: 0.05
+  ik_step_scale: 0.7
+
+robot:
+  left_ee_body: L_ee
+  right_ee_body: R_ee
+  left_arm_joints: [L_arm_j1, L_arm_j2, L_arm_j3, L_arm_j4, L_arm_j5, L_arm_j6, L_arm_j7]
+  right_arm_joints: [R_arm_j1, R_arm_j2, R_arm_j3, R_arm_j4, R_arm_j5, R_arm_j6, R_arm_j7]
+  # Policy/SDK order. Do not replace with articulation order: PhysX sorts by topology.
+  left_hand_joints:
+    [left_thumb_CMC_FE, left_thumb_CMC_AA, left_thumb_MCP_FE, left_thumb_MCP_AA, left_thumb_IP,
+     left_index_MCP_FE, left_index_MCP_AA, left_index_PIP, left_index_DIP,
+     left_middle_MCP_FE, left_middle_MCP_AA, left_middle_PIP, left_middle_DIP,
+     left_ring_MCP_FE, left_ring_MCP_AA, left_ring_PIP, left_ring_DIP,
+     left_pinky_CMC, left_pinky_MCP_FE, left_pinky_MCP_AA, left_pinky_PIP, left_pinky_DIP]
+  right_hand_joints:
+    [right_thumb_CMC_FE, right_thumb_CMC_AA, right_thumb_MCP_FE, right_thumb_MCP_AA, right_thumb_IP,
+     right_index_MCP_FE, right_index_MCP_AA, right_index_PIP, right_index_DIP,
+     right_middle_MCP_FE, right_middle_MCP_AA, right_middle_PIP, right_middle_DIP,
+     right_ring_MCP_FE, right_ring_MCP_AA, right_ring_PIP, right_ring_DIP,
+     right_pinky_CMC, right_pinky_MCP_FE, right_pinky_MCP_AA, right_pinky_PIP, right_pinky_DIP]
+  left_arm_initial: [0.84, 0.51, 0.37, -1.30, -0.65, -0.29, -0.03]
+  right_arm_initial: [-0.84, -0.51, -0.37, -1.30, 0.65, 0.29, 0.03]
+  torso_initial: [0.9, 1.57, 0.1]
+  head_initial: [0.28, 0.0, 0.0]
+
+cameras:
+  width: 640
+  height: 360
+  focal_length: 24.0
+  horizontal_aperture: 20.955
+  head:
+    parent: base
+    position: [0.65, 0.0, 1.45]
+    quaternion_wxyz: [0.5, 0.5, -0.5, -0.5]
+  left_wrist:
+    parent: L_arm_l8
+    position: [0.02, 0.06, 0.02]
+    quaternion_wxyz: [0.5, 0.5, -0.5, -0.5]
+  right_wrist:
+    parent: R_arm_l8
+    position: [0.02, -0.06, 0.02]
+    quaternion_wxyz: [0.5, 0.5, -0.5, -0.5]
