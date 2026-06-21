@@ -72,6 +72,6 @@ length, or controller gains.
 - Action order: local delta xyz + delta rot6d + 22 absolute Wave targets per side.
 - Every returned action is relative to the EEF poses at that chunk's start.
 - The evaluator resolves the 22 joints per hand in explicit Sharpa SDK/policy
-  order (not PhysX topology order) and stops if any mapped joint is absent.
+order (not PhysX topology order) and stops if any mapped joint is absent.
 - Tactile refinement is deliberately not faked with zero inputs. Add a contact
-  sensor-to-F6/deform model before enabling the cascaded fast requests.
+sensor-to-F6/deform model before enabling the cascaded fast requests.

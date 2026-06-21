@@ -244,6 +244,34 @@ cascaded-flow loss, and training loop are unchanged — the loader
 the embedded VQ-VAE tokenizes the raw F6 history that LeRobot `delta_timestamps`
 supplies. Requires the `lerobot` package importable (`pip install -e /path/to/lerobot`).
 
+#### Converting a subset of the public T-Rex dataset
+
+The public Hub release uses its archival 58-D joint-space schema, rather than
+the processed 62-D EEF/action-chunk schema consumed by post-training. Convert a
+task-related subset with:
+
+```bash
+# Pinocchio is needed for Vega arm forward kinematics.
+pip install -e 'dataset_quickstart[replay]'
+
+python utils/convert_public_trex_to_lerobot.py \
+    --source zekaiwang/trex_dataset \
+    --output_root /data/lerobot/trex_lift_and_place \
+    --repo_id local/trex_lift_and_place \
+    --motor_primitive lift_and_place \
+    --num_episodes 50 \
+    --max_download_gb 200
+```
+
+Filters may be repeated: `--episode_index`, `--motor_primitive`, `--object`,
+and `--target`; `--caption_regex` accepts a case-insensitive regular expression.
+For a Hub source the converter first filters the small episode metadata, then
+downloads only data/video shards referenced by the selected episodes. The size
+is checked against `--max_download_gb` before downloading. It performs Vega-1
+forward kinematics, creates `[16,62]` delta-base action chunks, maps RGB/F6/deform
+features, and writes `meta/trex_norm_stats.json`. Point `LEROBOT_ROOT` in
+`scripts/train.sh` at the resulting directory.
+
 ### VQ-VAE tactile codes (optional — on-the-fly is the default)
 
 By default the model **encodes tactile codes on the fly** from the raw F6
@@ -379,4 +407,3 @@ If you find T-Rex useful, please cite:
   url={https://arxiv.org/abs/2606.17055}, 
 }
 ```
-

@@ -1,3 +1,49 @@
+## Jun 21 1700
+
+Beginning work to fine-tune on T-Rex.
+
+Currently dealing with format mismatch between the author provided dataset and Dataloader expected format.
+
+This mismatch is noted by the HF public dataset card
+`https://huggingface.co/datasets/zekaiwang/trex_dataset`
+
+#### Format mismatch 
+Schema:
+* 58D joint state and target
+* Single-step absolute joint actions
+* Original image / tactile field names
+
+Post-training loader
+* 62D EEF + hand state 
+* [16, 62] local delta-EEF action chunks
+* renamed camera/tactile field names
+* meta/trex_norm_stats.json
+
+
+Current strategy:
+1. Inspect `meta/episodes/*.parquet` and select episodes by:
+`motor_primitive`
+`object`
+`caption`
+`target`
+
+2. Convert selected episodes into T-Rex’s canonical post-training representation:
+    
+- use Vega/Sharpa forward kinematics to convert each 7-D arm configuration to 9-D EEF pose;
+- build 16-step local delta-EEF chunks with `build_action_chunk`;
+- retain the 22 hand targets per hand;
+- rename/copy RGB, wrench and deform streams;
+- calculate the required q01/q99 normalization sidecar.
+
+The existing `convert_inlab_to_lerobot.py` contains most transformation logic, but it expects the authors’ raw HDF5 recording layout—not the released LeRobot dataset. A small public-dataset adapter is therefore needed.
+
+3. Configure `train.sh`
+
+
+Note:
+The authors’ data can provide useful manipulation priors, but it probably will not produce a successful Isaac policy by itself because it contains real-camera Vega demonstrations, while your environment has different rendering, object geometry, control timing, and no simulated tactile input. Your own Isaac demonstrations should be the final post-training dataset; mixing a related authors’ subset with Isaac demonstrations may be useful.
+
+
 ## Jun 20 1700
 
 #### Debugging embodiment gap
