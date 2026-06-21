@@ -1,5 +1,23 @@
 ## Jun 21 1700
 
+Current Strategy:
+
+1. Pilot with 50–100 related public episodes to validate conversion and training.
+2. Collect 100–300 successful Isaac demonstrations of the exact task, including varied initial poses, colors, distractors, and grasp approaches.
+3. Fine-tune from the released midtrain checkpoint on the combined dataset.
+4. Evaluate on held-out object poses/scenes, not merely random frames.
+
+#### How to collect the successful demos?
+
+With limited time, we have 1 viable option.
+
+Teleoperation: VR trackers/SpaceMouse for EEF control, with predefined hand re-targeting or glove-based finger retargeting.
+
+Since we don't have gloves, let's do WILOR-like hand retargeting.
+
+
+## Jun 21 1645
+
 Beginning work to fine-tune on T-Rex.
 
 Currently dealing with format mismatch between the author provided dataset and Dataloader expected format.
@@ -20,7 +38,8 @@ Post-training loader
 * meta/trex_norm_stats.json
 
 
-Current strategy:
+High-level WorkFlow:
+
 1. Inspect `meta/episodes/*.parquet` and select episodes by:
 `motor_primitive`
 `object`
