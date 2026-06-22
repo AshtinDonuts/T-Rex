@@ -74,4 +74,49 @@ length, or controller gains.
 - The evaluator resolves the 22 joints per hand in explicit Sharpa SDK/policy
 order (not PhysX topology order) and stops if any mapped joint is absent.
 - Tactile refinement is deliberately not faked with zero inputs. Add a contact
-sensor-to-F6/deform model before enabling the cascaded fast requests.
+  sensor-to-F6/deform model before enabling the cascaded fast requests.
+
+## Hand-keypoint teleoperation and collection
+
+`teleop_sharpa_keypoints.py` retargets tracker-independent 21-point hand
+keypoints to the two simulated 22-DoF Wave hands. It does not use Manus or
+VIVE. The first stable open-hand frames fit a similarity transform from each
+human hand into the actual simulated Wave geometry. Each later frame solves a
+weighted, damped differential IK problem over PIP, DIP, and fingertip markers,
+with confidence weighting, joint limits, neutral-posture regularization, and
+target smoothing. Commands are actuator position targets, so PhysX contacts
+remain active rather than having joint state overwritten.
+
+Prepare the asset as above, then run:
+
+```bash
+hardware_code/eval/isaac_lab/run_keypoint_teleop.sh --viz kit
+```
+
+The default receiver listens on UDP port 7001. Each datagram is UTF-8 JSON:
+
+```json
+{
+  "timestamp": 1710000000.125,
+  "left": {"keypoints": [[0.0, 0.0, 0.0, 0.99]]},
+  "right": {"keypoints": [[0.0, 0.0, 0.0, 0.99]]}
+}
+```
+
+Each `keypoints` array must contain 21 rows in MediaPipe/OpenPose hand order.
+Rows are `[x, y, z]` or `[x, y, z, confidence]`; coordinates must be metric and
+all hands in a packet must use one consistent camera/world frame. The abbreviated
+arrays above illustrate the schema only and are not valid packets.
+
+Hold each required hand open and steady for `calibration_frames`. Recording
+starts automatically after calibration and stops at `max_steps` or when the
+application closes. Episodes are saved under `keypoint_teleop.output_dir` as:
+
+- `trajectory.npz`: palm-normalized keypoints, exact SDK/policy-order hand
+  targets, measured hand joints, object pose/velocity, and optional RGB
+  observations packed as concatenated JPEG bytes plus frame offsets.
+- `metadata.json`: joint order, keypoint indices, timing, and fitted calibration.
+
+Set `required_sides: [right]` for one-handed operation. `--no-images` reduces
+recording size, while `--output-dir` and `--max-steps` override their YAML
+counterparts.

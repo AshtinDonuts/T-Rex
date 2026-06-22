@@ -20,6 +20,26 @@ simulation:
   ik_damping: 0.05
   ik_step_scale: 0.7
 
+# Tracker-independent hand-keypoint teleoperation. Packets are UDP JSON with
+# MediaPipe/OpenPose 21-keypoint ordering; see README.md for the schema.
+keypoint_teleop:
+  required_sides: [left, right]
+  bind_host: 0.0.0.0
+  port: 7001
+  timeout_s: 0.5
+  min_confidence: 0.5
+  filter_alpha: 0.35
+  max_keypoint_jump_m: 0.08
+  calibration_frames: 30
+  ik_damping: 0.04
+  neutral_regularization: 0.002
+  max_joint_step: 0.08
+  target_smoothing: 0.45
+  marker_weights: [0.35, 0.55, 1.0]  # PIP, DIP, fingertip
+  max_steps: 1800
+  record_stride: 1
+  output_dir: teleop_data
+
 robot:
   left_ee_body: left_hand_flange
   right_ee_body: right_hand_flange
@@ -38,6 +58,21 @@ robot:
      right_middle_MCP_FE, right_middle_MCP_AA, right_middle_PIP, right_middle_DIP,
      right_ring_MCP_FE, right_ring_MCP_AA, right_ring_PIP, right_ring_DIP,
      right_pinky_CMC, right_pinky_MCP_FE, right_pinky_MCP_AA, right_pinky_PIP, right_pinky_DIP]
+  hand_palm_bodies: {left: left_hand_C_MC, right: right_hand_C_MC}
+  # PIP joint frame, DIP joint frame, fingertip for thumb through pinky.
+  hand_tracking_bodies:
+    left:
+      [left_thumb_PP, left_thumb_DP, left_thumb_fingertip,
+       left_index_MP, left_index_DP, left_index_fingertip,
+       left_middle_MP, left_middle_DP, left_middle_fingertip,
+       left_ring_MP, left_ring_DP, left_ring_fingertip,
+       left_pinky_MP, left_pinky_DP, left_pinky_fingertip]
+    right:
+      [right_thumb_PP, right_thumb_DP, right_thumb_fingertip,
+       right_index_MP, right_index_DP, right_index_fingertip,
+       right_middle_MP, right_middle_DP, right_middle_fingertip,
+       right_ring_MP, right_ring_DP, right_ring_fingertip,
+       right_pinky_MP, right_pinky_DP, right_pinky_fingertip]
   left_arm_initial: [0.84, 0.51, 0.37, -1.30, -0.65, -0.29, -0.03]
   right_arm_initial: [-0.84, -0.51, -0.37, -1.30, 0.65, 0.29, 0.03]
   torso_initial: [0.9, 1.57, 0.1]
