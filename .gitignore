@@ -37,3 +37,4 @@ training_data/
 checkpoints/
 episode_viz/
 hardware_code/perception/models/
+.venv-d405/

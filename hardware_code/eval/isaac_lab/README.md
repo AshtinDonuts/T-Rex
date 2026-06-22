@@ -23,8 +23,8 @@ the Isaac Lab environment:
 cd /home/khw/RoCoIROS26/T-Rex
 python3 -m venv .venv-d405
 source .venv-d405/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r hardware_code/perception/requirements-d405.txt
+# python -m pip install --upgrade pip
+# python -m pip install -r hardware_code/perception/requirements-d405.txt
 hardware_code/perception/download_hand_landmarker.sh
 python hardware_code/perception/d405_hand_keypoints.py \
   --model hardware_code/perception/models/hand_landmarker.task \

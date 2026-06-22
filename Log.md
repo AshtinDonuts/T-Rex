@@ -1,3 +1,26 @@
+## Jun 22 1430
+
+Implemented tracker-free D405 teleoperation for collecting Isaac demonstrations.
+
+Pipeline:
+
+1. RealSense D405 captures aligned RGB and metric depth.
+2. MediaPipe extracts 21 hand landmarks from RGB.
+3. Local median depth lifts each landmark into D405 camera-frame XYZ.
+4. Keypoints are sent over UDP to Isaac Lab.
+5. Palm-normalized landmarks control the 22-DoF Sharpa Wave hands; global palm motion optionally controls the 7-DoF DexMate arms through IK.
+
+Hand-only and hand+arm modes are separate. Hand-only does not require camera extrinsic calibration. Hand+arm requires calibrating the D405-to-robot-base rotation before collecting demonstrations.
+
+Dry-run results:
+
+- D405, MediaPipe, Isaac USD, 70 robot joints, and three RGB cameras initialized successfully.
+- Both retargeting modes completed calibration and produced valid 32-frame, 58-D recordings.
+- Hand+arm IK had approximately 4.9 mm maximum position error in the synthetic test.
+
+Remaining live checks are handedness, D405 tracking quality/occlusion, and camera-to-robot rotation. PhysX also reports invalid mass/inertia on `arm_center`; this should be fixed before relying on contact-dynamics accuracy.
+
+
 ## Jun 21 1700
 
 Current Strategy:
@@ -119,4 +142,3 @@ Created isaac-lab supported eval module to test mid-training T-Rex checkpoint.
 ## Jun 20 15:00
 
 Forked Repo under AshtinDonuts.
-
