@@ -16,6 +16,15 @@ parser.add_argument("--output-dir", type=Path, default=None)
 parser.add_argument("--max-steps", type=int, default=None)
 parser.add_argument("--no-images", action="store_true")
 parser.add_argument("--diagnostics", action="store_true", help="Print per-finger retargeting errors.")
+side_group = parser.add_mutually_exclusive_group()
+side_group.add_argument(
+    "--left-only", action="store_true",
+    help="Calibrate and retarget only the left hand, overriding required_sides in YAML.",
+)
+side_group.add_argument(
+    "--right-only", action="store_true",
+    help="Calibrate and retarget only the right hand, overriding required_sides in YAML.",
+)
 parser.add_argument(
     "--hand-only", action="store_true", help="Retarget Wave fingers while holding DexMate arms fixed."
 )
@@ -397,7 +406,12 @@ def main() -> None:
     sim_cfg = cfg["simulation"]
     robot_cfg = cfg["robot"]
     teleop_cfg = cfg["keypoint_teleop"]
-    required_sides = teleop_cfg.get("required_sides", ["left", "right"])
+    if args_cli.left_only:
+        required_sides = ["left"]
+    elif args_cli.right_only:
+        required_sides = ["right"]
+    else:
+        required_sides = teleop_cfg.get("required_sides", ["left", "right"])
     if not required_sides or any(side not in ("left", "right") for side in required_sides):
         raise ValueError("keypoint_teleop.required_sides must contain left and/or right")
     usd_path = resolve_path(config_path, cfg["asset"]["usd_path"])
@@ -411,23 +425,31 @@ def main() -> None:
     sim_utils.GroundPlaneCfg().func("/World/Ground", sim_utils.GroundPlaneCfg())
     light = sim_utils.DomeLightCfg(intensity=2500.0, color=(0.9, 0.9, 0.9))
     light.func("/World/Light", light)
-    table = sim_utils.CuboidCfg(
-        size=(1.2, 1.6, 0.04), collision_props=sim_utils.CollisionPropertiesCfg(),
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.32, 0.22)),
-    )
-    table.func("/World/Table", table, translation=(0.8, 0.0, sim_cfg["table_height"] - 0.02))
-
-    object_cfg = RigidObjectCfg(
-        prim_path="/World/Object",
-        spawn=sim_utils.CuboidCfg(
-            size=(0.06, 0.06, 0.12), rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1)),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.75, 0.0, sim_cfg["table_height"] + 0.06)),
-    )
-    object_asset = RigidObject(object_cfg)
+    object_asset: RigidObject | None = None
+    if args_cli.diagnostics:
+        print("Diagnostic scene: robot + ground only (table and rigid object omitted).")
+    else:
+        table = sim_utils.CuboidCfg(
+            size=(1.2, 1.6, 0.04), collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.32, 0.22)),
+        )
+        table.func(
+            "/World/Table", table,
+            translation=(0.8, 0.0, sim_cfg["table_height"] - 0.02),
+        )
+        object_cfg = RigidObjectCfg(
+            prim_path="/World/Object",
+            spawn=sim_utils.CuboidCfg(
+                size=(0.06, 0.06, 0.12), rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.1, 0.1)),
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(
+                pos=(0.75, 0.0, sim_cfg["table_height"] + 0.06)
+            ),
+        )
+        object_asset = RigidObject(object_cfg)
     robot = Articulation(
         ArticulationCfg(
             prim_path=cfg["asset"]["prim_path"], spawn=sim_utils.UsdFileCfg(usd_path=str(usd_path)),
@@ -451,10 +473,12 @@ def main() -> None:
 
     for _ in range(sim_cfg["settle_steps"]):
         robot.write_data_to_sim()
-        object_asset.write_data_to_sim()
+        if object_asset is not None:
+            object_asset.write_data_to_sim()
         sim.step()
         robot.update(sim_cfg["dt"])
-        object_asset.update(sim_cfg["dt"])
+        if object_asset is not None:
+            object_asset.update(sim_cfg["dt"])
         for camera in cameras.values():
             camera.update(sim_cfg["dt"])
 
@@ -685,10 +709,12 @@ def main() -> None:
                     last_diagnostic_report = diagnostic_now
 
             robot.write_data_to_sim()
-            object_asset.write_data_to_sim()
+            if object_asset is not None:
+                object_asset.write_data_to_sim()
             sim.step()
             robot.update(sim_cfg["dt"])
-            object_asset.update(sim_cfg["dt"])
+            if object_asset is not None:
+                object_asset.update(sim_cfg["dt"])
             for camera in cameras.values():
                 camera.update(sim_cfg["dt"])
 
@@ -745,8 +771,13 @@ def main() -> None:
                         action_components["right_arm"], action_components["right_hand"],
                     )
                 )
-                records["object_pose"].append(object_asset.data.root_pose_w.torch[0].detach().cpu().numpy())
-                records["object_velocity"].append(object_asset.data.root_vel_w.torch[0].detach().cpu().numpy())
+                if object_asset is not None:
+                    records["object_pose"].append(
+                        object_asset.data.root_pose_w.torch[0].detach().cpu().numpy()
+                    )
+                    records["object_velocity"].append(
+                        object_asset.data.root_vel_w.torch[0].detach().cpu().numpy()
+                    )
                 if not args_cli.no_images:
                     records["image_head"].append(camera_jpeg(cameras["head"]))
                     records["image_wrist_left"].append(camera_jpeg(cameras["left_wrist"]))
@@ -759,6 +790,8 @@ def main() -> None:
         metadata = {
             "format": "trex_isaac_keypoint_demo_v2",
             "retarget_mode": "hand_only" if args_cli.hand_only else "hand_and_arm",
+            "diagnostic_scene": bool(args_cli.diagnostics),
+            "required_sides": required_sides,
             "simulation_dt": sim_cfg["dt"],
             "record_stride": teleop_cfg["record_stride"],
             "fps": 1.0 / (sim_cfg["dt"] * teleop_cfg["record_stride"]),
