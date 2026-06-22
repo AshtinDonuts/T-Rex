@@ -76,16 +76,16 @@ order (not PhysX topology order) and stops if any mapped joint is absent.
 - Tactile refinement is deliberately not faked with zero inputs. Add a contact
   sensor-to-F6/deform model before enabling the cascaded fast requests.
 
-## Hand-keypoint teleoperation and collection
+## Keypoint teleoperation and collection
 
 `teleop_sharpa_keypoints.py` retargets tracker-independent 21-point hand
-keypoints to the two simulated 22-DoF Wave hands. It does not use Manus or
-VIVE. The first stable open-hand frames fit a similarity transform from each
-human hand into the actual simulated Wave geometry. Each later frame solves a
-weighted, damped differential IK problem over PIP, DIP, and fingertip markers,
-with confidence weighting, joint limits, neutral-posture regularization, and
-target smoothing. Commands are actuator position targets, so PhysX contacts
-remain active rather than having joint state overwritten.
+keypoints to both 7-DoF DexMate arms and both 22-DoF Wave hands. It does not use
+Manus or VIVE. The first stable open-hand frames calibrate human palm motion
+against the initial simulated end-effector poses and fit hand geometry into the
+actual Wave geometry. Later frames use global palm SE(3) motion for arm targets
+and palm-normalized landmarks for finger targets. Commands are actuator
+position targets, so PhysX contacts remain active rather than having joint
+state overwritten.
 
 Prepare the asset as above, then run:
 
@@ -98,24 +98,46 @@ The default receiver listens on UDP port 7001. Each datagram is UTF-8 JSON:
 ```json
 {
   "timestamp": 1710000000.125,
+  "frame_id": "head_camera",
   "left": {"keypoints": [[0.0, 0.0, 0.0, 0.99]]},
   "right": {"keypoints": [[0.0, 0.0, 0.0, 0.99]]}
 }
 ```
 
 Each `keypoints` array must contain 21 rows in MediaPipe/OpenPose hand order.
-Rows are `[x, y, z]` or `[x, y, z, confidence]`; coordinates must be metric and
-all hands in a packet must use one consistent camera/world frame. The abbreviated
-arrays above illustrate the schema only and are not valid packets.
+Rows are `[x, y, z]` or `[x, y, z, confidence]`. For arm motion, coordinates
+must be metric, have stable scale, and remain in the named camera/world frame;
+all hands in a packet must use that same frame. The abbreviated arrays above
+illustrate the schema only and are not valid packets.
+
+Set `camera_to_robot_quaternion_wxyz` to the calibrated rotation from the
+`keypoint_frame_id` into the robot base frame. Packets with a different frame
+ID are rejected. The default rotation matches the configured
+fixed head camera. Translation is unnecessary because arm retargeting uses
+motion relative to the calibration pose. If the perception system is monocular
+and does not produce stable metric depth, add depth/stereo fusion before using
+arm translation; palm normalization hides scale errors from finger IK but arm
+targets cannot.
 
 Hold each required hand open and steady for `calibration_frames`. Recording
 starts automatically after calibration and stops at `max_steps` or when the
 application closes. Episodes are saved under `keypoint_teleop.output_dir` as:
 
-- `trajectory.npz`: palm-normalized keypoints, exact SDK/policy-order hand
-  targets, measured hand joints, object pose/velocity, and optional RGB
-  observations packed as concatenated JPEG bytes plus frame offsets.
-- `metadata.json`: joint order, keypoint indices, timing, and fitted calibration.
+- `trajectory.npz`: canonical 58-D `observation_state` and `action` arrays in
+  `[L arm 7 | L hand 22 | R arm 7 | R hand 22]` order, component targets and
+  states, palm/EEF poses, IK residuals, object state, and optional RGB images
+  packed as concatenated JPEG bytes plus frame offsets.
+- `metadata.json`: exact 58-D joint order, camera-to-base rotation, timing,
+  keypoint indices, and fitted arm/hand calibrations.
+
+The default `record_stride: 2` converts the 60 Hz simulation loop to the T-Rex
+dataset's canonical 30 Hz sample rate.
+
+Only new UDP datagrams update targets. Short dropouts hold the last safe target;
+an active episode ends after `abort_timeout_s`. Arm targets are constrained by
+per-side workspace bounds, joint limits, bounded joint steps, posture
+regularization, and smoothing. Review `arm_workspace` and the camera rotation
+for every deployment.
 
 Set `required_sides: [right]` for one-handed operation. `--no-images` reduces
 recording size, while `--output-dir` and `--max-steps` override their YAML

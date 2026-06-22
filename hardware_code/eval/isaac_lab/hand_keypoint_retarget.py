@@ -44,6 +44,7 @@ class HandSample:
 @dataclass(frozen=True)
 class KeypointPacket:
     timestamp: float
+    frame_id: str
     hands: dict[str, HandSample]
 
 
@@ -69,7 +70,9 @@ def parse_packet(payload: bytes | str | dict[str, Any]) -> KeypointPacket:
     hands = {side: _parse_hand(payload[side]) for side in ("left", "right") if side in payload}
     if not hands:
         raise ValueError("Keypoint packet contains neither 'left' nor 'right'")
-    return KeypointPacket(float(payload.get("timestamp", time.time())), hands)
+    return KeypointPacket(
+        float(payload.get("timestamp", time.time())), str(payload.get("frame_id", "camera")), hands
+    )
 
 
 class UdpKeypointReceiver:
@@ -82,6 +85,7 @@ class UdpKeypointReceiver:
         self._lock = threading.Lock()
         self._latest: KeypointPacket | None = None
         self._arrival_time = 0.0
+        self._sequence = 0
         self._error: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -103,6 +107,7 @@ class UdpKeypointReceiver:
                 with self._lock:
                     self._latest = packet
                     self._arrival_time = time.monotonic()
+                    self._sequence += 1
                     self._error = None
             except socket.timeout:
                 continue
@@ -110,11 +115,11 @@ class UdpKeypointReceiver:
                 with self._lock:
                     self._error = str(exc)
 
-    def latest(self) -> tuple[KeypointPacket | None, float, str | None]:
+    def latest(self) -> tuple[KeypointPacket | None, int, float, str | None]:
         with self._lock:
             age = time.monotonic() - self._arrival_time if self._latest is not None else np.inf
             packet = self._latest if age <= self.timeout_s else None
-            return packet, float(age), self._error
+            return packet, self._sequence, float(age), self._error
 
     def stop(self) -> None:
         self._stop.set()
@@ -179,6 +184,122 @@ def palm_normalize(sample: HandSample) -> tuple[np.ndarray, np.ndarray, np.ndarr
 
 
 @dataclass(frozen=True)
+class PalmPose:
+    position: np.ndarray
+    rotation: np.ndarray
+
+    def __post_init__(self) -> None:
+        if self.position.shape != (3,) or self.rotation.shape != (3, 3):
+            raise ValueError("PalmPose expects position (3,) and rotation (3, 3)")
+        if not np.isfinite(self.position).all() or not np.isfinite(self.rotation).all():
+            raise ValueError("Palm pose must be finite")
+
+
+def palm_pose(sample: HandSample) -> PalmPose:
+    """Estimate a 6-DoF palm pose from confidence-gated palm landmarks."""
+    _, wrist, rotation, _ = palm_normalize(sample)
+    palm_ids = np.array([WRIST, 5, 9, 13, 17])
+    weights = np.maximum(sample.confidence[palm_ids], 1e-6)
+    # Bias toward the wrist while reducing single-landmark depth noise.
+    points = sample.xyz[palm_ids]
+    center = 0.5 * wrist + 0.5 * np.average(points, axis=0, weights=weights)
+    return PalmPose(center, rotation)
+
+
+def project_rotation(matrix: np.ndarray) -> np.ndarray:
+    """Project a noisy matrix onto SO(3)."""
+    u, _, vt = np.linalg.svd(matrix)
+    rotation = u @ vt
+    if np.linalg.det(rotation) < 0:
+        u[:, -1] *= -1
+        rotation = u @ vt
+    return rotation
+
+
+def average_rotation(rotations: list[np.ndarray]) -> np.ndarray:
+    if not rotations:
+        raise ValueError("At least one rotation is required")
+    return project_rotation(np.mean(rotations, axis=0))
+
+
+def _rotation_angle(rotation: np.ndarray) -> float:
+    return float(np.arccos(np.clip((np.trace(rotation) - 1.0) * 0.5, -1.0, 1.0)))
+
+
+def _interpolate_rotation(first: np.ndarray, second: np.ndarray, alpha: float) -> np.ndarray:
+    relative = first.T @ second
+    angle = _rotation_angle(relative)
+    if angle < 1e-8:
+        return first.copy()
+    skew = (relative - relative.T) / (2.0 * np.sin(angle))
+    scaled = alpha * angle
+    incremental = np.eye(3) + np.sin(scaled) * skew + (1.0 - np.cos(scaled)) * (skew @ skew)
+    return project_rotation(first @ incremental)
+
+
+class PalmPoseFilter:
+    """Bounded-jump SE(3) filter for vision-derived palm poses."""
+
+    def __init__(self, position_alpha: float, rotation_alpha: float, max_jump_m: float, max_jump_rad: float):
+        self.position_alpha = position_alpha
+        self.rotation_alpha = rotation_alpha
+        self.max_jump_m = max_jump_m
+        self.max_jump_rad = max_jump_rad
+        self._state: dict[str, PalmPose] = {}
+
+    def update(self, side: str, pose: PalmPose) -> PalmPose | None:
+        previous = self._state.get(side)
+        if previous is None:
+            self._state[side] = pose
+            return pose
+        if np.linalg.norm(pose.position - previous.position) > self.max_jump_m:
+            return None
+        if _rotation_angle(previous.rotation.T @ pose.rotation) > self.max_jump_rad:
+            return None
+        filtered = PalmPose(
+            self.position_alpha * pose.position + (1.0 - self.position_alpha) * previous.position,
+            _interpolate_rotation(previous.rotation, pose.rotation, self.rotation_alpha),
+        )
+        self._state[side] = filtered
+        return filtered
+
+
+def relative_pose_target(
+    current: PalmPose,
+    initial: PalmPose,
+    initial_target: PalmPose,
+    camera_to_robot_rotation: np.ndarray,
+    translation_scale: float = 1.0,
+) -> PalmPose:
+    """Map relative camera-frame palm motion onto an initial robot-frame target."""
+    camera_to_robot_rotation = project_rotation(np.asarray(camera_to_robot_rotation, dtype=np.float64))
+    delta_position = camera_to_robot_rotation @ (current.position - initial.position)
+    delta_rotation_camera = current.rotation @ initial.rotation.T
+    delta_rotation_robot = (
+        camera_to_robot_rotation @ delta_rotation_camera @ camera_to_robot_rotation.T
+    )
+    return PalmPose(
+        initial_target.position + translation_scale * delta_position,
+        project_rotation(delta_rotation_robot @ initial_target.rotation),
+    )
+
+
+def quaternion_wxyz_to_matrix(quaternion: np.ndarray) -> np.ndarray:
+    quaternion = np.asarray(quaternion, dtype=np.float64)
+    if quaternion.shape != (4,):
+        raise ValueError("Quaternion must have shape (4,)")
+    quaternion = quaternion / np.linalg.norm(quaternion)
+    w, x, y, z = quaternion
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+
+
+@dataclass(frozen=True)
 class SimilarityTransform:
     scale: float
     rotation: np.ndarray
@@ -215,3 +336,23 @@ def fit_similarity(source: np.ndarray, target: np.ndarray) -> SimilarityTransfor
 def tracked_points(local_keypoints: np.ndarray) -> np.ndarray:
     return np.asarray(local_keypoints, dtype=np.float64)[TRACKED_INDICES]
 
+
+def assemble_trex_vector(
+    left_arm: np.ndarray,
+    left_hand: np.ndarray,
+    right_arm: np.ndarray,
+    right_hand: np.ndarray,
+) -> np.ndarray:
+    """Assemble canonical T-Rex `[L arm|L hand|R arm|R hand]` 58-D data."""
+    values = [
+        np.asarray(left_arm),
+        np.asarray(left_hand),
+        np.asarray(right_arm),
+        np.asarray(right_hand),
+    ]
+    expected = [(7,), (22,), (7,), (22,)]
+    if [value.shape for value in values] != expected:
+        raise ValueError(
+            f"Expected component shapes {expected}, got {[value.shape for value in values]}"
+        )
+    return np.concatenate(values)

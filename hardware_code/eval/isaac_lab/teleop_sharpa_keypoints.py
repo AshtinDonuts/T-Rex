@@ -33,15 +33,22 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
 from isaaclab.sensors.camera import Camera, CameraCfg
-from isaaclab.utils.math import matrix_from_quat
+from isaaclab.utils.math import compute_pose_error, matrix_from_quat, quat_from_matrix
 
 from hand_keypoint_retarget import (
     KeypointFilter,
+    PalmPose,
+    PalmPoseFilter,
     SimilarityTransform,
     TRACKED_INDICES,
     UdpKeypointReceiver,
+    assemble_trex_vector,
+    average_rotation,
     fit_similarity,
+    palm_pose,
     palm_normalize,
+    quaternion_wxyz_to_matrix,
+    relative_pose_target,
     tracked_points,
 )
 
@@ -124,9 +131,11 @@ class HandRetargeter:
     def calibrated(self) -> bool:
         return self.transform is not None
 
-    def observe_calibration(self, local: np.ndarray) -> bool:
+    def observe_calibration(self, local: np.ndarray, confidence: np.ndarray) -> bool:
         if self.transform is not None:
             return True
+        if np.any(confidence[TRACKED_INDICES] < float(self.cfg["min_confidence"])):
+            return False
         self.calibration_samples.append(tracked_points(local))
         if len(self.calibration_samples) < int(self.cfg["calibration_frames"]):
             return False
@@ -193,6 +202,127 @@ class HandRetargeter:
         }
 
 
+class ArmRetargeter:
+    """Map relative vision palm poses to one DexMate EEF and solve its 7-DoF IK."""
+
+    def __init__(
+        self,
+        side: str,
+        robot: Articulation,
+        joint_ids: list[int],
+        ee_body_id: int,
+        cfg: dict,
+        camera_to_robot_rotation: np.ndarray,
+    ):
+        self.side = side
+        self.robot = robot
+        self.joint_ids = joint_ids
+        self.ee_body_id = ee_body_id
+        self.cfg = cfg
+        self.camera_to_robot_rotation = camera_to_robot_rotation
+        self.calibration_samples: list[PalmPose] = []
+        self.initial_palm: PalmPose | None = None
+        self.initial_ee: PalmPose | None = None
+        self.target_joint_pos = robot.data.joint_pos.torch[:, joint_ids].clone()
+        self.default_joint_pos = self.target_joint_pos.clone()
+        self.target_pose: PalmPose | None = None
+        self.position_error = np.full(3, np.nan)
+        self.rotation_error = np.full(3, np.nan)
+
+    @property
+    def calibrated(self) -> bool:
+        return self.initial_palm is not None
+
+    def observe_calibration(self, pose: PalmPose) -> bool:
+        if self.calibrated:
+            return True
+        self.calibration_samples.append(pose)
+        if len(self.calibration_samples) < int(self.cfg["calibration_frames"]):
+            return False
+        initial_position = np.mean([sample.position for sample in self.calibration_samples], axis=0)
+        initial_rotation = average_rotation([sample.rotation for sample in self.calibration_samples])
+        ee_pose = self.robot.data.body_pose_w.torch[0, self.ee_body_id]
+        ee_rotation = matrix_from_quat(ee_pose[3:7].unsqueeze(0))[0].detach().cpu().numpy()
+        self.initial_palm = PalmPose(initial_position, initial_rotation)
+        self.initial_ee = PalmPose(ee_pose[:3].detach().cpu().numpy(), ee_rotation)
+        self.target_pose = self.initial_ee
+        print(f"{self.side} arm calibration complete at EEF {self.initial_ee.position.round(3)}")
+        return True
+
+    def solve(self, pose: PalmPose) -> torch.Tensor:
+        assert self.initial_palm is not None and self.initial_ee is not None
+        desired = relative_pose_target(
+            pose,
+            self.initial_palm,
+            self.initial_ee,
+            self.camera_to_robot_rotation,
+            float(self.cfg["arm_translation_scale"]),
+        )
+        workspace = self.cfg["arm_workspace"][self.side]
+        desired_position = np.clip(
+            desired.position,
+            np.asarray(workspace["min"], dtype=np.float64),
+            np.asarray(workspace["max"], dtype=np.float64),
+        )
+        self.target_pose = PalmPose(desired_position, desired.rotation)
+
+        target_position = torch.as_tensor(
+            desired_position, dtype=torch.float32, device=self.robot.device
+        ).unsqueeze(0)
+        target_rotation = torch.as_tensor(
+            desired.rotation, dtype=torch.float32, device=self.robot.device
+        ).unsqueeze(0)
+        target_quaternion = quat_from_matrix(target_rotation)
+        current = self.robot.data.body_pose_w.torch[:, self.ee_body_id]
+        position_error, rotation_error = compute_pose_error(
+            current[:, :3], current[:, 3:7], target_position, target_quaternion
+        )
+        self.position_error = position_error[0].detach().cpu().numpy()
+        self.rotation_error = rotation_error[0].detach().cpu().numpy()
+        error = torch.cat(
+            (position_error, float(self.cfg["arm_orientation_weight"]) * rotation_error), dim=-1
+        ).unsqueeze(-1)
+
+        jac_body_id = self.ee_body_id - 1 if self.robot.is_fixed_base else self.ee_body_id
+        columns = [joint + self.robot.num_base_dofs for joint in self.joint_ids]
+        jacobian = self.robot.data.body_link_jacobian_w.torch[:, jac_body_id, :, columns].clone()
+        jacobian[:, 3:6] *= float(self.cfg["arm_orientation_weight"])
+        damping = float(self.cfg["arm_ik_damping"])
+        posture = float(self.cfg["arm_posture_regularization"])
+        identity = torch.eye(len(self.joint_ids), device=self.robot.device).unsqueeze(0)
+        lhs = jacobian.transpose(1, 2) @ jacobian + (damping**2 + posture) * identity
+        rhs = jacobian.transpose(1, 2) @ error
+        rhs += posture * (self.default_joint_pos - self.target_joint_pos).unsqueeze(-1)
+        delta = torch.linalg.solve(lhs, rhs).squeeze(-1)
+        delta = torch.clamp(
+            delta, -float(self.cfg["arm_max_joint_step"]), float(self.cfg["arm_max_joint_step"])
+        )
+        candidate = self.target_joint_pos + delta
+        limits = self.robot.data.soft_joint_pos_limits.torch[:, self.joint_ids]
+        candidate = torch.maximum(torch.minimum(candidate, limits[..., 1]), limits[..., 0])
+        alpha = float(self.cfg["arm_target_smoothing"])
+        self.target_joint_pos = alpha * candidate + (1.0 - alpha) * self.target_joint_pos
+        return self.target_joint_pos
+
+    def target_matrix(self) -> np.ndarray:
+        matrix = np.full((4, 4), np.nan, dtype=np.float32)
+        if self.target_pose is not None:
+            matrix[:] = np.eye(4, dtype=np.float32)
+            matrix[:3, :3] = self.target_pose.rotation
+            matrix[:3, 3] = self.target_pose.position
+        return matrix
+
+    def calibration_dict(self) -> dict | None:
+        if self.initial_palm is None or self.initial_ee is None:
+            return None
+        return {
+            "initial_palm_position": self.initial_palm.position.tolist(),
+            "initial_palm_rotation": self.initial_palm.rotation.tolist(),
+            "initial_ee_position": self.initial_ee.position.tolist(),
+            "initial_ee_rotation": self.initial_ee.rotation.tolist(),
+        }
+
+
 def camera_rgb(camera: Camera) -> np.ndarray:
     return camera.data.output["rgb"].torch[0, ..., :3].detach().cpu().numpy().astype(np.uint8)
 
@@ -201,6 +331,23 @@ def camera_jpeg(camera: Camera) -> bytes:
     stream = io.BytesIO()
     Image.fromarray(camera_rgb(camera), mode="RGB").save(stream, format="JPEG", quality=90)
     return stream.getvalue()
+
+
+def pose_matrix(pose: PalmPose | None) -> np.ndarray:
+    matrix = np.full((4, 4), np.nan, dtype=np.float32)
+    if pose is not None:
+        matrix[:] = np.eye(4, dtype=np.float32)
+        matrix[:3, :3] = pose.rotation
+        matrix[:3, 3] = pose.position
+    return matrix
+
+
+def body_pose_matrix(robot: Articulation, body_id: int) -> np.ndarray:
+    value = robot.data.body_pose_w.torch[0, body_id]
+    matrix = np.eye(4, dtype=np.float32)
+    matrix[:3, :3] = matrix_from_quat(value[3:7].unsqueeze(0))[0].detach().cpu().numpy()
+    matrix[:3, 3] = value[:3].detach().cpu().numpy()
+    return matrix
 
 
 def save_episode(output_dir: Path, records: dict[str, list], metadata: dict) -> Path:
@@ -294,12 +441,23 @@ def main() -> None:
         for camera in cameras.values():
             camera.update(sim_cfg["dt"])
 
-    retargeters = {}
+    hand_retargeters = {}
+    arm_retargeters = {}
+    camera_to_robot_rotation = quaternion_wxyz_to_matrix(
+        np.asarray(teleop_cfg["camera_to_robot_quaternion_wxyz"], dtype=np.float64)
+    )
     for side in ("left", "right"):
-        joint_ids = exact_ids(robot, robot_cfg[f"{side}_hand_joints"])
+        hand_joint_ids = exact_ids(robot, robot_cfg[f"{side}_hand_joints"])
         palm_id = exact_ids(robot, [robot_cfg["hand_palm_bodies"][side]], bodies=True)[0]
         marker_ids = exact_ids(robot, robot_cfg["hand_tracking_bodies"][side], bodies=True)
-        retargeters[side] = HandRetargeter(side, robot, joint_ids, palm_id, marker_ids, teleop_cfg)
+        hand_retargeters[side] = HandRetargeter(
+            side, robot, hand_joint_ids, palm_id, marker_ids, teleop_cfg
+        )
+        arm_joint_ids = exact_ids(robot, robot_cfg[f"{side}_arm_joints"])
+        ee_body_id = exact_ids(robot, [robot_cfg[f"{side}_ee_body"]], bodies=True)[0]
+        arm_retargeters[side] = ArmRetargeter(
+            side, robot, arm_joint_ids, ee_body_id, teleop_cfg, camera_to_robot_rotation
+        )
 
     receiver = UdpKeypointReceiver(
         teleop_cfg["bind_host"], int(teleop_cfg["port"]), float(teleop_cfg["timeout_s"])
@@ -309,14 +467,29 @@ def main() -> None:
         float(teleop_cfg["filter_alpha"]), float(teleop_cfg["min_confidence"]),
         float(teleop_cfg["max_keypoint_jump_m"]),
     )
+    palm_filter = PalmPoseFilter(
+        float(teleop_cfg["palm_position_alpha"]),
+        float(teleop_cfg["palm_rotation_alpha"]),
+        float(teleop_cfg["max_palm_jump_m"]),
+        float(teleop_cfg["max_palm_jump_rad"]),
+    )
     print(f"Listening for 21-point hand JSON on udp://{teleop_cfg['bind_host']}:{teleop_cfg['port']}")
     print("Hold each visible hand open and steady during calibration; recording starts automatically afterward.")
 
     records: dict[str, list] = {
-        "time": [], "tracker_timestamp": [],
+        "time": [], "tracker_timestamp": [], "keypoint_age": [], "input_valid": [],
         "left_keypoints_palm_normalized": [], "right_keypoints_palm_normalized": [],
-        "left_target_joint_pos": [], "right_target_joint_pos": [],
-        "left_joint_pos": [], "right_joint_pos": [], "object_pose": [], "object_velocity": [],
+        "left_palm_pose_camera": [], "right_palm_pose_camera": [],
+        "left_arm_target_pose": [], "right_arm_target_pose": [],
+        "left_arm_actual_pose": [], "right_arm_actual_pose": [],
+        "left_arm_ik_position_error": [], "right_arm_ik_position_error": [],
+        "left_arm_ik_rotation_error": [], "right_arm_ik_rotation_error": [],
+        "left_arm_target_joint_pos": [], "right_arm_target_joint_pos": [],
+        "left_hand_target_joint_pos": [], "right_hand_target_joint_pos": [],
+        "left_arm_joint_pos": [], "right_arm_joint_pos": [],
+        "left_hand_joint_pos": [], "right_hand_joint_pos": [],
+        "observation_state": [], "action": [],
+        "object_pose": [], "object_velocity": [],
         "image_head": [], "image_wrist_left": [], "image_wrist_right": [],
     }
     start_time = time.monotonic()
@@ -325,36 +498,79 @@ def main() -> None:
     max_steps = args_cli.max_steps or int(teleop_cfg["max_steps"])
     output_dir = args_cli.output_dir or resolve_path(config_path, teleop_cfg["output_dir"])
     last_packet_timestamp = np.nan
+    last_sequence = -1
+    last_valid_input_time: dict[str, float | None] = {"left": None, "right": None}
+    latest_observations: dict[str, tuple[np.ndarray, np.ndarray, PalmPose]] = {}
 
     try:
         while simulation_app.is_running() and step < max_steps:
-            packet, age, error = receiver.latest()
+            packet, sequence, _transport_age, error = receiver.latest()
+            new_packet = packet is not None and sequence != last_sequence
+            updated_observations: dict[str, tuple[np.ndarray, np.ndarray, PalmPose]] = {}
             if error and step % 120 == 0:
                 print(f"Ignoring malformed keypoint packet: {error}")
-            normalized: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-            if packet is not None:
+            if new_packet:
+                last_sequence = sequence
                 last_packet_timestamp = packet.timestamp
-                for side, sample in packet.hands.items():
+                if packet.frame_id != teleop_cfg["keypoint_frame_id"]:
+                    print(
+                        f"Ignoring keypoint frame {packet.frame_id!r}; expected "
+                        f"{teleop_cfg['keypoint_frame_id']!r}"
+                    )
+                    new_packet = False
+                for side, sample in (packet.hands.items() if new_packet else ()):
                     filtered = keypoint_filter.update(side, sample)
                     if filtered is None:
                         continue
                     try:
                         local, _, _, _ = palm_normalize(filtered)
+                        filtered_palm = palm_filter.update(side, palm_pose(filtered))
                     except ValueError:
                         continue
-                    normalized[side] = (local, filtered.confidence)
-                    retargeters[side].observe_calibration(local)
+                    if filtered_palm is None:
+                        continue
+                    latest_observations[side] = (local, filtered.confidence, filtered_palm)
+                    updated_observations[side] = (local, filtered.confidence, filtered_palm)
+                    hand_retargeters[side].observe_calibration(local, filtered.confidence)
+                    arm_retargeters[side].observe_calibration(filtered_palm)
+                update_time = time.monotonic()
+                for side in updated_observations:
+                    last_valid_input_time[side] = update_time
 
-            if not recording and all(retargeters[side].calibrated for side in required_sides):
+            now = time.monotonic()
+            valid_ages = {
+                side: now - timestamp if timestamp is not None else np.inf
+                for side, timestamp in last_valid_input_time.items()
+            }
+            valid_age = max(valid_ages[side] for side in required_sides)
+            if recording and valid_age > float(teleop_cfg["abort_timeout_s"]):
+                print(
+                    f"Valid keypoint stream stale for {valid_age:.2f}s; "
+                    "ending episode while holding targets."
+                )
+                break
+
+            if not recording and all(
+                hand_retargeters[side].calibrated and arm_retargeters[side].calibrated
+                for side in required_sides
+            ):
                 recording = True
                 start_time = time.monotonic()
                 print(f"Required hands calibrated ({', '.join(required_sides)}); episode recording started.")
 
-            for side, (local, confidence) in normalized.items():
-                retargeter = retargeters[side]
-                if retargeter.calibrated:
-                    target = retargeter.solve(local, confidence)
-                    robot.set_joint_position_target_index(target=target, joint_ids=retargeter.joint_ids)
+            if new_packet:
+                for side, (local, confidence, filtered_palm) in updated_observations.items():
+                    hand_retargeter = hand_retargeters[side]
+                    arm_retargeter = arm_retargeters[side]
+                    if hand_retargeter.calibrated and arm_retargeter.calibrated:
+                        hand_target = hand_retargeter.solve(local, confidence)
+                        arm_target = arm_retargeter.solve(filtered_palm)
+                        robot.set_joint_position_target_index(
+                            target=hand_target, joint_ids=hand_retargeter.joint_ids
+                        )
+                        robot.set_joint_position_target_index(
+                            target=arm_target, joint_ids=arm_retargeter.joint_ids
+                        )
 
             robot.write_data_to_sim()
             object_asset.write_data_to_sim()
@@ -368,18 +584,55 @@ def main() -> None:
                 nan_keypoints = np.full((21, 3), np.nan, dtype=np.float32)
                 records["time"].append(time.monotonic() - start_time)
                 records["tracker_timestamp"].append(last_packet_timestamp)
+                records["keypoint_age"].append(valid_age)
+                records["input_valid"].append(valid_age <= float(teleop_cfg["timeout_s"]))
                 records["left_keypoints_palm_normalized"].append(
-                    normalized.get("left", (nan_keypoints, None))[0]
+                    latest_observations.get("left", (nan_keypoints, None, None))[0]
                 )
                 records["right_keypoints_palm_normalized"].append(
-                    normalized.get("right", (nan_keypoints, None))[0]
+                    latest_observations.get("right", (nan_keypoints, None, None))[0]
                 )
+                records["left_palm_pose_camera"].append(
+                    pose_matrix(latest_observations.get("left", (None, None, None))[2])
+                )
+                records["right_palm_pose_camera"].append(
+                    pose_matrix(latest_observations.get("right", (None, None, None))[2])
+                )
+                state_components = {}
+                action_components = {}
                 for side in ("left", "right"):
-                    r = retargeters[side]
-                    records[f"{side}_target_joint_pos"].append(r.target[0].detach().cpu().numpy())
-                    records[f"{side}_joint_pos"].append(
-                        robot.data.joint_pos.torch[0, r.joint_ids].detach().cpu().numpy()
+                    hand = hand_retargeters[side]
+                    arm = arm_retargeters[side]
+                    arm_actual = robot.data.joint_pos.torch[0, arm.joint_ids].detach().cpu().numpy()
+                    hand_actual = robot.data.joint_pos.torch[0, hand.joint_ids].detach().cpu().numpy()
+                    arm_target = arm.target_joint_pos[0].detach().cpu().numpy()
+                    hand_target = hand.target[0].detach().cpu().numpy()
+                    records[f"{side}_arm_target_joint_pos"].append(arm_target)
+                    records[f"{side}_hand_target_joint_pos"].append(hand_target)
+                    records[f"{side}_arm_joint_pos"].append(arm_actual)
+                    records[f"{side}_hand_joint_pos"].append(hand_actual)
+                    records[f"{side}_arm_target_pose"].append(arm.target_matrix())
+                    records[f"{side}_arm_actual_pose"].append(
+                        body_pose_matrix(robot, arm.ee_body_id)
                     )
+                    records[f"{side}_arm_ik_position_error"].append(arm.position_error.copy())
+                    records[f"{side}_arm_ik_rotation_error"].append(arm.rotation_error.copy())
+                    state_components[f"{side}_arm"] = arm_actual
+                    state_components[f"{side}_hand"] = hand_actual
+                    action_components[f"{side}_arm"] = arm_target
+                    action_components[f"{side}_hand"] = hand_target
+                records["observation_state"].append(
+                    assemble_trex_vector(
+                        state_components["left_arm"], state_components["left_hand"],
+                        state_components["right_arm"], state_components["right_hand"],
+                    )
+                )
+                records["action"].append(
+                    assemble_trex_vector(
+                        action_components["left_arm"], action_components["left_hand"],
+                        action_components["right_arm"], action_components["right_hand"],
+                    )
+                )
                 records["object_pose"].append(object_asset.data.root_pose_w.torch[0].detach().cpu().numpy())
                 records["object_velocity"].append(object_asset.data.root_vel_w.torch[0].detach().cpu().numpy())
                 if not args_cli.no_images:
@@ -392,12 +645,24 @@ def main() -> None:
 
     if records["time"]:
         metadata = {
-            "format": "trex_isaac_keypoint_demo_v1",
+            "format": "trex_isaac_keypoint_demo_v2",
             "simulation_dt": sim_cfg["dt"],
             "record_stride": teleop_cfg["record_stride"],
-            "joint_order": {side: robot_cfg[f"{side}_hand_joints"] for side in ("left", "right")},
+            "fps": 1.0 / (sim_cfg["dt"] * teleop_cfg["record_stride"]),
+            "keypoint_frame_id": teleop_cfg["keypoint_frame_id"],
+            "state_action_order": [
+                *robot_cfg["left_arm_joints"], *robot_cfg["left_hand_joints"],
+                *robot_cfg["right_arm_joints"], *robot_cfg["right_hand_joints"],
+            ],
             "tracked_keypoint_indices": TRACKED_INDICES.tolist(),
-            "calibration": {side: retargeters[side].calibration_dict() for side in ("left", "right")},
+            "camera_to_robot_rotation": camera_to_robot_rotation.tolist(),
+            "calibration": {
+                side: {
+                    "hand": hand_retargeters[side].calibration_dict(),
+                    "arm": arm_retargeters[side].calibration_dict(),
+                }
+                for side in ("left", "right")
+            },
         }
         episode_dir = save_episode(Path(output_dir), records, metadata)
         print(f"Saved {len(records['time'])} frames to {episode_dir}")
