@@ -31,7 +31,7 @@ Important paths in `cluster.env`:
 Budget at least 300 GB of scratch space initially. The actual required shard
 size is reported before download.
 
-## 2. Select, review, and convert
+## 2. Select, review, and convert 
 
 The first run downloads metadata only and writes deterministic manifests:
 
