@@ -155,6 +155,11 @@ globally.
 Fine-tune the released **midtrain** checkpoint on your own task, then serve it.
 Edit the path variables at the top of each `.sh`, then run it.
 
+For the one-node, four-A100 public-trajectory pickup pilot, use the isolated
+Slurm workflow in [`cluster/pickup_finetune/`](cluster/pickup_finetune/README.md).
+It selects and converts a reviewed `grasp and lift` subset without changing the
+workstation `scripts/train.sh` launcher.
+
 
 | Step           | Script             | Key vars to set (top of script)                                                                  | What it does                                                                                                                                                                                                                                                                                  |
 | -------------- | ------------------ | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

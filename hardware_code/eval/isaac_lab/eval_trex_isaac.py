@@ -13,6 +13,9 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--config", type=Path, default=Path(__file__).with_name("trex_isaac.yaml"))
 parser.add_argument("--task-description", type=str, default=None)
 parser.add_argument("--dry-run", action="store_true", help="Build and render the scene without contacting T-Rex.")
+parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--record-video", type=Path, default=None,
+                    help="Write a three-camera comparison MP4")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
@@ -27,6 +30,7 @@ import numpy as np
 import torch
 import yaml
 import zmq
+import cv2
 from PIL import Image
 
 import isaaclab.sim as sim_utils
@@ -109,6 +113,18 @@ def camera_rgb(camera: Camera) -> np.ndarray:
     return image[..., :3]
 
 
+def comparison_frame(images: dict[str, np.ndarray]) -> np.ndarray:
+    panels = []
+    for key, label in (("head", "head"), ("left_wrist", "left wrist"),
+                       ("right_wrist", "right wrist")):
+        panel = cv2.resize(images[key], (320, 180), interpolation=cv2.INTER_AREA)
+        panel = cv2.cvtColor(panel, cv2.COLOR_RGB2BGR)
+        cv2.putText(panel, label, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (255, 255, 255), 2, cv2.LINE_AA)
+        panels.append(panel)
+    return np.concatenate(panels, axis=1)
+
+
 def dls_step(
     robot: Articulation,
     joint_ids: list[int],
@@ -132,6 +148,8 @@ def dls_step(
 
 
 def main() -> None:
+    np.random.seed(args_cli.seed)
+    torch.manual_seed(args_cli.seed)
     config_path = args_cli.config.resolve()
     cfg = yaml.safe_load(config_path.read_text())
     sim_cfg = cfg["simulation"]
@@ -226,6 +244,15 @@ def main() -> None:
     print(f"Connected to {inference_cfg['server_address']}; task={task!r}")
 
     step = 0
+    video_writer = None
+    if args_cli.record_video is not None:
+        args_cli.record_video.parent.mkdir(parents=True, exist_ok=True)
+        video_writer = cv2.VideoWriter(
+            str(args_cli.record_video), cv2.VideoWriter_fourcc(*"mp4v"),
+            round(1.0 / sim_cfg["dt"]), (960, 180),
+        )
+        if not video_writer.isOpened():
+            raise RuntimeError(f"Could not open video writer: {args_cli.record_video}")
     while simulation_app.is_running() and step < inference_cfg["max_steps"]:
         left_pose = robot.data.body_pose_w.torch[:, left_ee_id]
         right_pose = robot.data.body_pose_w.torch[:, right_ee_id]
@@ -282,10 +309,15 @@ def main() -> None:
             robot.update(sim_cfg["dt"])
             for camera in cameras.values():
                 camera.update(sim_cfg["dt"])
+            if video_writer is not None:
+                video_writer.write(comparison_frame(
+                    {name: camera_rgb(camera) for name, camera in cameras.items()}
+                ))
             step += 1
             if step >= inference_cfg["max_steps"]:
                 break
-
+    if video_writer is not None:
+        video_writer.release()
     socket.close(linger=0)
     context.term()
 

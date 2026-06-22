@@ -84,12 +84,88 @@ def exact_ids(robot: Articulation, names: list[str], bodies: bool = False) -> li
     return ids
 
 
-def set_named_positions(robot: Articulation, mapping: dict[str, float]) -> None:
+WHEEL_JOINTS = [
+    "B_wheel_j1", "B_wheel_j2", "R_wheel_j1", "R_wheel_j2", "L_wheel_j1", "L_wheel_j2",
+]
+
+
+def joint_target_from_mapping(robot: Articulation, mapping: dict[str, float]) -> torch.Tensor:
     positions = robot.data.default_joint_pos.torch.clone()
     for name, value in mapping.items():
         positions[:, exact_ids(robot, [name])[0]] = value
+    return positions
+
+
+def set_named_positions(robot: Articulation, mapping: dict[str, float]) -> None:
+    positions = joint_target_from_mapping(robot, mapping)
     robot.write_joint_position_to_sim_index(position=positions)
     robot.set_joint_position_target_index(target=positions)
+
+
+def build_rest_pose_mapping(robot_cfg: dict, required_sides: list[str]) -> dict[str, float]:
+    """Joint targets for the fixed base, arms, head, wheels, and any non-retargeted hands."""
+    rest_pose = {}
+    rest_pose.update(dict(zip(robot_cfg["left_arm_joints"], robot_cfg["left_arm_initial"])))
+    rest_pose.update(dict(zip(robot_cfg["right_arm_joints"], robot_cfg["right_arm_initial"])))
+    rest_pose.update(dict(zip(["torso_j1", "torso_j2", "torso_j3"], robot_cfg["torso_initial"])))
+    rest_pose.update(dict(zip(["head_j1", "head_j2", "head_j3"], robot_cfg["head_initial"])))
+    rest_pose.update({name: 0.0 for name in WHEEL_JOINTS})
+    for side in ("left", "right"):
+        if side not in required_sides:
+            rest_pose.update({name: 0.0 for name in robot_cfg[f"{side}_hand_joints"]})
+    return rest_pose
+
+
+def hold_joints_at_targets(
+    robot: Articulation, joint_ids: list[int], targets: torch.Tensor, *, before_sim_write: bool
+) -> None:
+    """Lock joints at rest targets.
+
+    ``before_sim_write=True``: set PD targets before ``write_data_to_sim``.
+    ``before_sim_write=False``: hard-set sim state immediately before ``sim.step``.
+    """
+    if before_sim_write:
+        robot.set_joint_position_target_index(target=targets, joint_ids=joint_ids)
+        return
+    robot.write_joint_position_to_sim_index(position=targets, joint_ids=joint_ids)
+    robot.write_joint_velocity_to_sim_index(
+        velocity=torch.zeros_like(targets), joint_ids=joint_ids
+    )
+
+
+def make_actuator_cfg(hand_only: bool, required_sides: list[str]) -> dict[str, ImplicitActuatorCfg]:
+    if not hand_only:
+        return {
+            "all": ImplicitActuatorCfg(
+                joint_names_expr=[".*"], stiffness=400.0, damping=40.0, effort_limit_sim=200.0
+            )
+        }
+    body_patterns = [
+        "torso_.*",
+        "head_.*",
+        "L_arm_j[1-7]",
+        "R_arm_j[1-7]",
+        ".*_wheel_j.*",
+    ]
+    for side in ("left", "right"):
+        if side not in required_sides:
+            body_patterns.append(f"{side}_.*")
+    actuators = {
+        "body": ImplicitActuatorCfg(
+            joint_names_expr=body_patterns,
+            stiffness=10000.0,
+            damping=1000.0,
+            effort_limit_sim=10000.0,
+        ),
+    }
+    for side in required_sides:
+        actuators[f"{side}_hand"] = ImplicitActuatorCfg(
+            joint_names_expr=[f"{side}_.*"],
+            stiffness=400.0,
+            damping=40.0,
+            effort_limit_sim=200.0,
+        )
+    return actuators
 
 
 def make_camera(name: str, cfg: dict, camera_cfg: dict, robot_prim: str) -> Camera:
@@ -453,9 +529,7 @@ def main() -> None:
     robot = Articulation(
         ArticulationCfg(
             prim_path=cfg["asset"]["prim_path"], spawn=sim_utils.UsdFileCfg(usd_path=str(usd_path)),
-            actuators={"all": ImplicitActuatorCfg(
-                joint_names_expr=[".*"], stiffness=400.0, damping=40.0, effort_limit_sim=200.0
-            )},
+            actuators=make_actuator_cfg(args_cli.hand_only, required_sides),
         )
     )
     cameras = {
@@ -464,15 +538,19 @@ def main() -> None:
     }
     sim.reset()
 
-    initial = dict(zip(robot_cfg["left_arm_joints"], robot_cfg["left_arm_initial"]))
-    initial.update(dict(zip(robot_cfg["right_arm_joints"], robot_cfg["right_arm_initial"])))
-    initial.update(dict(zip(["torso_j1", "torso_j2", "torso_j3"], robot_cfg["torso_initial"])))
-    initial.update(dict(zip(["head_j1", "head_j2", "head_j3"], robot_cfg["head_initial"])))
+    rest_pose = build_rest_pose_mapping(robot_cfg, required_sides)
+    initial = dict(rest_pose)
     initial.update({name: 0.0 for name in robot_cfg["left_hand_joints"] + robot_cfg["right_hand_joints"]})
     set_named_positions(robot, initial)
+    fixed_joint_ids = exact_ids(robot, list(rest_pose.keys()))
+    fixed_joint_targets = joint_target_from_mapping(robot, rest_pose)[:, fixed_joint_ids]
 
     for _ in range(sim_cfg["settle_steps"]):
+        if args_cli.hand_only:
+            hold_joints_at_targets(robot, fixed_joint_ids, fixed_joint_targets, before_sim_write=True)
         robot.write_data_to_sim()
+        if args_cli.hand_only:
+            hold_joints_at_targets(robot, fixed_joint_ids, fixed_joint_targets, before_sim_write=False)
         if object_asset is not None:
             object_asset.write_data_to_sim()
         sim.step()
@@ -516,6 +594,11 @@ def main() -> None:
     )
     print(f"Listening for 21-point hand JSON on udp://{teleop_cfg['bind_host']}:{teleop_cfg['port']}")
     print(f"Retarget mode: {'hand only (arms fixed)' if args_cli.hand_only else 'hand + arm'}")
+    if args_cli.hand_only:
+        print(
+            f"Holding {len(fixed_joint_ids)} body joints at rest pose "
+            f"(kinematic lock + high-stiffness actuators)."
+        )
     calibration_frames = int(teleop_cfg["calibration_frames"])
     calibration_countdown_s = float(teleop_cfg.get("calibration_countdown_s", 3.0))
     print(
@@ -708,9 +791,18 @@ def main() -> None:
                             print(hand_retargeter.diagnostic_summary())
                     last_diagnostic_report = diagnostic_now
 
+            if args_cli.hand_only:
+                hold_joints_at_targets(
+                    robot, fixed_joint_ids, fixed_joint_targets, before_sim_write=True
+                )
+
             robot.write_data_to_sim()
             if object_asset is not None:
                 object_asset.write_data_to_sim()
+            if args_cli.hand_only:
+                hold_joints_at_targets(
+                    robot, fixed_joint_ids, fixed_joint_targets, before_sim_write=False
+                )
             sim.step()
             robot.update(sim_cfg["dt"])
             if object_asset is not None:

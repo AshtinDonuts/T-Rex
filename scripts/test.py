@@ -710,6 +710,10 @@ class CascadedServer:
 
 
 def main(args):
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     print(f"Loading VLA model from checkpoint: {args.checkpoint_path}")
     model, processor, statistic = model_load(args)
     print("Model loaded successfully!")
@@ -799,6 +803,8 @@ if __name__ == "__main__":
                         help="0 = auto-detect from training_args.json")
     parser.add_argument("--cuda", type=str, default="0")
     parser.add_argument("--port", type=int, default=5555)
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Seed flow noise for reproducible matched comparisons")
     parser.add_argument("--image_size", type=int, nargs=2, default=None, metavar=("W", "H"))
 
     # Cascaded flow matching schedule (auto-detected from training_args.json
@@ -835,4 +841,3 @@ if __name__ == "__main__":
     if bool(args.use_tactile_code) and not args.vqvae_ckpt:
         parser.error("--vqvae_ckpt must be set when --use_tactile_code 1")
     main(args)
-

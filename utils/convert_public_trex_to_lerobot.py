@@ -128,15 +128,11 @@ def _download_selected(
     revision: str | None,
     max_download_gb: float,
 ) -> None:
-    from huggingface_hub import HfApi, hf_hub_download
+    from huggingface_hub import hf_hub_download
 
     info = json.loads((root / "meta" / "info.json").read_text())
     files = _selected_files(info, rows)
-    repo = HfApi().repo_info(
-        repo_id=repo_id, repo_type="dataset", revision=revision, files_metadata=True
-    )
-    sizes = {entry.rfilename: (entry.size or 0) for entry in repo.siblings}
-    size_gb = sum(sizes.get(path, 0) for path in files) / 1e9
+    size_gb = _estimate_selected_gb(repo_id, root, files, revision)
     print(f"Selected episodes reference {len(files)} unique files ({size_gb:.2f} GB).")
     if size_gb > max_download_gb:
         raise RuntimeError(
@@ -152,6 +148,21 @@ def _download_selected(
             revision=revision,
             local_dir=str(root),
         )
+
+
+def _estimate_selected_gb(
+    repo_id: str, root: Path, files: list[str], revision: str | None, remote: bool = True
+) -> float:
+    """Estimate unique selected shard size without downloading those shards."""
+    if remote:
+        from huggingface_hub import HfApi
+
+        repo = HfApi().repo_info(
+            repo_id=repo_id, repo_type="dataset", revision=revision, files_metadata=True
+        )
+        sizes = {entry.rfilename: (entry.size or 0) for entry in repo.siblings}
+        return sum(sizes.get(path, 0) for path in files) / 1e9
+    return sum((root / path).stat().st_size for path in files if (root / path).exists()) / 1e9
 
 
 def _prepare_source(source: str, cache_dir: str | None, revision: str | None) -> tuple[str, Path, bool]:
@@ -180,11 +191,35 @@ def _matches(value: Any, requested: list[str]) -> bool:
     return actual in {item.casefold() for item in requested}
 
 
+def _read_manifest_episode_ids(path: str | None) -> list[int]:
+    if not path:
+        return []
+    manifest = Path(path).expanduser()
+    if manifest.suffix.lower() == ".csv":
+        frame = pd.read_csv(manifest)
+        if "episode_index" not in frame:
+            raise ValueError(f"Manifest {manifest} has no episode_index column")
+        return frame["episode_index"].astype(int).tolist()
+    payload = json.loads(manifest.read_text())
+    values = payload if isinstance(payload, list) else payload.get("episode_indices")
+    if values is None:
+        raise ValueError(f"Manifest {manifest} has no episode_indices field")
+    return [int(value) for value in values]
+
+
 def _select_episodes(rows: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
     selected = rows
-    if args.episode_index:
-        wanted = set(args.episode_index)
+    requested_ids = [
+        *args.episode_index,
+        *_read_manifest_episode_ids(getattr(args, "episode_manifest", None)),
+    ]
+    if requested_ids:
+        wanted = set(requested_ids)
         selected = selected[selected["episode_index"].isin(wanted)]
+        found = set(selected["episode_index"].astype(int).tolist())
+        missing = sorted(wanted.difference(found))
+        if missing:
+            raise ValueError(f"Requested episode indices are absent from metadata: {missing[:10]}")
     for column, requested in (
         ("motor_primitive", args.motor_primitive),
         ("object", args.object),
@@ -208,6 +243,38 @@ def _select_episodes(rows: pd.DataFrame, args: argparse.Namespace) -> pd.DataFra
     if selected.empty:
         raise ValueError("No episodes matched the requested filters")
     return selected.sort_values("episode_index")
+
+
+def _write_selection_report(
+    selected: pd.DataFrame,
+    path: str,
+    source: str,
+    revision: str | None,
+    required_files: list[str],
+    estimated_gb: float,
+) -> None:
+    destination = Path(path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        name
+        for name in ("episode_index", "motor_primitive", "object", "target", "caption")
+        if name in selected
+    ]
+    if destination.suffix.lower() == ".csv":
+        selected[columns].to_csv(destination, index=False)
+        return
+    episode_rows = selected[columns].copy()
+    episode_rows = episode_rows.astype(object).where(pd.notna(episode_rows), None)
+    payload = {
+        "source": source,
+        "revision": revision,
+        "episode_indices": selected["episode_index"].astype(int).tolist(),
+        "num_episodes": int(len(selected)),
+        "num_unique_files": len(required_files),
+        "estimated_download_gb": estimated_gb,
+        "episodes": json.loads(episode_rows.to_json(orient="records")),
+    }
+    destination.write_text(json.dumps(payload, indent=2))
 
 
 class VegaForwardKinematics:
@@ -362,7 +429,9 @@ def _output_frame(record: dict[str, Any], chunk: np.ndarray, caption: str) -> tu
     return frame, tactile
 
 
-def _caption(row: pd.Series) -> str:
+def _caption(row: pd.Series, override: str | None = None) -> str:
+    if override:
+        return override
     for key in ("caption", "tasks", "task"):
         if key not in row:
             continue
@@ -390,32 +459,53 @@ def _default_urdf() -> Path:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default="zekaiwang/trex_dataset", help="Hub repo ID or local dataset root")
-    parser.add_argument("--output_root", required=True)
+    parser.add_argument("--output_root", help="Required unless --selection_only is used")
     parser.add_argument("--repo_id", default="local/trex_public_posttrain")
     parser.add_argument("--cache_dir", help="Hub download directory")
     parser.add_argument("--revision")
     parser.add_argument("--urdf", default=str(_default_urdf()))
     parser.add_argument("--episode_index", type=int, action="append", default=[])
+    parser.add_argument("--episode_manifest", help="CSV or JSON episode-selection manifest")
     parser.add_argument("--motor_primitive", action="append", default=[])
     parser.add_argument("--object", action="append", default=[])
     parser.add_argument("--target", action="append", default=[])
     parser.add_argument("--caption_regex")
+    parser.add_argument("--instruction_override", help="Replace every selected caption")
     parser.add_argument("--num_episodes", type=int, default=0, help="0 means all matched episodes")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_download_gb", type=float, default=100.0)
+    parser.add_argument("--selection_only", action="store_true",
+                        help="Report metadata and shard size, then exit before data download")
+    parser.add_argument("--selection_report", help="Selection report path (.json or .csv)")
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    output_root = Path(args.output_root).expanduser().resolve()
-    if output_root.exists() and any(output_root.iterdir()):
+    if not args.selection_only and not args.output_root:
+        raise ValueError("--output_root is required unless --selection_only is used")
+    output_root = Path(args.output_root).expanduser().resolve() if args.output_root else None
+    if output_root is not None and output_root.exists() and any(output_root.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {output_root}")
 
     source_repo_id, source_root, remote = _prepare_source(args.source, args.cache_dir, args.revision)
     metadata = _load_episode_metadata(source_root)
     selected = _select_episodes(metadata, args)
     print(f"Selected {len(selected)} of {len(metadata)} episodes.")
+    info = json.loads((source_root / "meta" / "info.json").read_text())
+    required_files = _selected_files(info, selected)
+    estimated_gb = _estimate_selected_gb(
+        source_repo_id, source_root, required_files, args.revision, remote=remote
+    )
+    print(f"Selection references {len(required_files)} unique files ({estimated_gb:.2f} GB).")
+    if args.selection_report:
+        _write_selection_report(
+            selected, args.selection_report, args.source, args.revision,
+            required_files, estimated_gb,
+        )
+        print(f">>> Selection report: {Path(args.selection_report).expanduser()}")
+    if args.selection_only:
+        return
     if remote:
         _download_selected(
             source_repo_id, source_root, selected, args.revision, args.max_download_gb
@@ -447,8 +537,8 @@ def main() -> None:
     )
     del probe_ds, probe
 
-    info = json.loads((source_root / "meta" / "info.json").read_text())
     fps = int(info.get("fps", 30))
+    assert output_root is not None
     output_root.mkdir(parents=True, exist_ok=True)
     output = LeRobotDataset.create(
         repo_id=args.repo_id,
@@ -462,7 +552,7 @@ def main() -> None:
 
     for ordinal, (_, row) in enumerate(selected.iterrows(), 1):
         episode_index = int(row["episode_index"])
-        caption = _caption(row)
+        caption = _caption(row, args.instruction_override)
         source_ds = LeRobotDataset(source_repo_id, root=source_root, episodes=[episode_index])
         pending: deque[dict[str, Any]] = deque()
         episode_states: list[np.ndarray] = []

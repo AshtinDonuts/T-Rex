@@ -521,6 +521,8 @@ def save_checkpoint(model, processor, accelerator, args, epoch, global_step, sta
                 "cascaded_total_steps": getattr(args, "cascaded_total_steps", 10),
                 "cascaded_split_step":  getattr(args, "cascaded_split_step", 6),
                 "flare_frame_stride": getattr(args, "flare_frame_stride", 2),
+                "sample_stride": getattr(args, "sample_stride", 1),
+                "optimizer_step": global_step,
             }, f, indent=2)
 
         with open(os.path.join(save_dir, "stats_data.json"), "w") as f:
@@ -912,6 +914,8 @@ def train(args):
         // accelerator.gradient_accumulation_steps
         // dist.get_world_size()
     )
+    if args.max_train_steps > 0:
+        num_training_steps = min(num_training_steps, args.max_train_steps)
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=int(args.warmup_rates * num_training_steps),
@@ -926,7 +930,10 @@ def train(args):
         model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
 
     metric = TrainingMetrics(device=torch.cuda.current_device())
-    global_step = 0
+    micro_step = 0
+    global_step = 0  # optimizer steps (not gradient-accumulation microsteps)
+    last_saved_step = -1
+    stop_training = False
     T_per_frame = args.n_flare_tokens_per_frame
     S_steps = args.n_flare_steps
     K = T_per_frame * S_steps  # total flare tokens
@@ -1175,12 +1182,15 @@ def train(args):
             metric.update(loss, loss_act, loss_tac, loss_flare)
             accelerator.backward(loss)
 
-            if (global_step + 1) % accelerator.gradient_accumulation_steps == 0:
+            optimizer_stepped = False
+            if (micro_step + 1) % accelerator.gradient_accumulation_steps == 0:
                 if args.max_grad_norm > 0:
                     accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+                global_step += 1
+                optimizer_stepped = True
 
                 m = metric.get_metric()
                 if accelerator.is_main_process:
@@ -1204,9 +1214,9 @@ def train(args):
                     wandb.log(log_dict, step=global_step)
 
             # ── Validation ──
-            if (val_dataloader is not None
+            if (optimizer_stepped and val_dataloader is not None
                     and getattr(args, "val_freq", 0) > 0
-                    and (global_step + 1) % args.val_freq == 0):
+                    and global_step % args.val_freq == 0):
                 val_m = run_validation(
                     model, val_dataloader, accelerator, args,
                     is_stage1, use_flare, K, T_per_frame, flare_layer_idx)
@@ -1217,12 +1227,33 @@ def train(args):
                         f"tac={val_m['val/tactile_loss']:.6f}")
                     wandb.log(val_m, step=global_step)
 
-            global_step += 1
+            if (optimizer_stepped and args.save_steps > 0
+                    and global_step % args.save_steps == 0):
+                accelerator.wait_for_everyone()
+                save_checkpoint(model, processor, accelerator, args,
+                                epoch, global_step, dataset.stats_data)
+                last_saved_step = global_step
 
-        if (epoch + 1) % args.save_freq == 0 or epoch == args.n_epochs - 1:
+            if (optimizer_stepped and args.max_train_steps > 0
+                    and global_step >= args.max_train_steps):
+                stop_training = True
+            micro_step += 1
+            if stop_training:
+                break
+
+        should_save_epoch = (
+            (epoch + 1) % args.save_freq == 0
+            or epoch == args.n_epochs - 1
+            or stop_training
+        )
+        if should_save_epoch and global_step != last_saved_step:
             accelerator.wait_for_everyone()
             save_checkpoint(model, processor, accelerator, args,
                             epoch, global_step, dataset.stats_data)
+            last_saved_step = global_step
+        if stop_training:
+            accelerator.print(f"Reached max_train_steps={args.max_train_steps}.")
+            break
 
 
 if __name__ == "__main__":
@@ -1245,6 +1276,10 @@ if __name__ == "__main__":
 
     parser.add_argument("--n_epochs", type=int, default=200)
     parser.add_argument("--save_freq", type=int, default=50)
+    parser.add_argument("--save_steps", type=int, default=0,
+                        help="Save every N optimizer steps (0=epoch-only)")
+    parser.add_argument("--max_train_steps", type=int, default=0,
+                        help="Stop after N optimizer steps (0=use all epochs)")
     parser.add_argument("--train_bsz_per_gpu", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
@@ -1253,6 +1288,8 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--sample_stride", type=int, default=1,
+                        help="LeRobot only: train/evaluate every Nth frame")
 
     parser.add_argument("--action_dim", type=int, default=31)
     parser.add_argument("--action_chunk", type=int, default=8)
@@ -1337,4 +1374,3 @@ if __name__ == "__main__":
     os.makedirs(args.output_dir, exist_ok=True)
 
     train(args)
-

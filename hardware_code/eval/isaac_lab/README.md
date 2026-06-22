@@ -43,11 +43,12 @@ Diagnostic mode shows RGB beside aligned depth. Fingertip labels are
 `landmark_index:depth_mm`; red segments indicate an unusually long 3D bone or
 large depth discontinuity, often caused by sampling the background.
 
-For one-hand testing, change `required_sides` in `trex_isaac.yaml` to `[right]`
-or `[left]`. Keep `[left, right]` for bimanual testing. After all required hands
-are visible, Isaac prints a three-second countdown. Keep them open and still
-during the countdown and the following 30-frame capture; the console prints
-progress, pause/resume events, completion, and recording start.
+For one-hand testing, pass `--right-only` or `--left-only` to the Isaac command;
+these override `required_sides` in `trex_isaac.yaml` for that run. Without either
+flag, the YAML setting applies. After all required hands are visible, Isaac
+prints a three-second countdown. Keep them open and still during the countdown
+and the following 30-frame capture; the console prints progress, pause/resume
+events, completion, and recording start.
 
 ### 3A. Test hand-only retargeting
 
@@ -57,14 +58,19 @@ the following. The Wave fingers move while both DexMate arms remain fixed.
 ```bash
 cd /home/khw/RoCoIROS26/T-Rex
 hardware_code/eval/isaac_lab/run_keypoint_teleop.sh \
-  --hand-only --diagnostics --viz kit \
+  --hand-only --right-only --diagnostics --viz kit \
   --output-dir /tmp/trex_hand_only
 ```
+
+Replace `--right-only` with `--left-only` for the left hand, or remove it for
+bimanual calibration. `--hand-only` keeps both DexMate arms fixed; the side flag
+selects which Sharpa hand is calibrated and retargeted.
 
 Confirm that each simulated fingertip follows its corresponding human
 fingertip before enabling arm movement. The console reports total and
 per-finger marker errors once per second, which separates a bad camera lift
-from a finger-specific Sharpa fit or IK problem.
+from a finger-specific Sharpa fit or IK problem. In Isaac, `--diagnostics`
+also removes the table and rigid cube, leaving only the robot and ground plane.
 
 ### 3B. Test hand + arm retargeting
 

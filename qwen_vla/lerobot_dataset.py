@@ -103,6 +103,7 @@ class TRexLeRobotDataset(torch.utils.data.Dataset):
         self.use_robot_state = bool(getattr(config, "use_robot_state", 0))
         self.vqvae_window = int(getattr(config, "vqvae_window", 16))
         self.action_dim = int(getattr(config, "action_dim", ACTION_DIM))
+        self.sample_stride = max(1, int(getattr(config, "sample_stride", 1)))
 
         # ── normalization stats (q01/q99 sidecar) ──
         self.stats_data = _stats if _stats is not None else load_norm_stats(root)
@@ -126,8 +127,11 @@ class TRexLeRobotDataset(torch.utils.data.Dataset):
             self.ds = LeRobotDataset(
                 repo_id, root=root, episodes=episodes,
                 delta_timestamps=self._build_delta_timestamps())
-        accelerator.print(f"[LeRobot] {repo_id}: {len(self.ds)} frames, fps={self.fps}, "
-                          f"wrist={self.has_wrist}, tactile={self.has_tactile}")
+        accelerator.print(
+            f"[LeRobot] {repo_id}: {len(self.ds)} raw frames, {len(self)} samples, "
+            f"sample_stride={self.sample_stride}, fps={self.fps}, "
+            f"wrist={self.has_wrist}, tactile={self.has_tactile}"
+        )
 
     # head: index 0 = current slow image; 1..S = FLARE future frames.
     def _head_offsets(self):
@@ -147,10 +151,14 @@ class TRexLeRobotDataset(torch.utils.data.Dataset):
         return dt
 
     def __len__(self):
-        return len(self.ds)
+        return (len(self.ds) + self.sample_stride - 1) // self.sample_stride
 
     def __getitem__(self, idx):
-        return self.ds[idx]   # LeRobot item dict (tensors + task + *_is_pad)
+        if idx < 0:
+            idx += len(self)
+        if idx < 0 or idx >= len(self):
+            raise IndexError(idx)
+        return self.ds[idx * self.sample_stride]  # temporal lookup inside ds remains at native fps
 
     def create_val_split(self, val_ratio=0.05, seed=42):
         """Split by episode index; returns a val TRexLeRobotDataset (shares stats)."""
