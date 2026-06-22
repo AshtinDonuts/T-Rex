@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
@@ -14,6 +15,7 @@ parser.add_argument("--config", type=Path, default=Path(__file__).with_name("tre
 parser.add_argument("--output-dir", type=Path, default=None)
 parser.add_argument("--max-steps", type=int, default=None)
 parser.add_argument("--no-images", action="store_true")
+parser.add_argument("--diagnostics", action="store_true", help="Print per-finger retargeting errors.")
 parser.add_argument(
     "--hand-only", action="store_true", help="Retarget Wave fingers while holding DexMate arms fixed."
 )
@@ -127,6 +129,7 @@ class HandRetargeter:
         self.calibration_samples: list[np.ndarray] = []
         self.transform: SimilarityTransform | None = None
         self.target = robot.data.joint_pos.torch[:, joint_ids].clone()
+        self.marker_error_mm = np.full(15, np.nan)
         base_weights = torch.tensor(cfg["marker_weights"], device=robot.device)
         self.weights = base_weights.repeat(5).repeat_interleave(1)
 
@@ -146,9 +149,11 @@ class HandRetargeter:
         target = body_points_in_palm(self.robot, self.palm_id, self.marker_ids)
         self.transform = fit_similarity(source, target)
         residual = np.linalg.norm(self.transform.apply(source) - target, axis=1)
+        per_finger = np.sqrt(np.mean(residual.reshape(5, 3) ** 2, axis=1)) * 1000
         print(
             f"{self.side} calibration complete: scale={self.transform.scale:.4f} m/palm-width, "
-            f"marker RMSE={np.sqrt(np.mean(residual**2)) * 1000:.1f} mm"
+            f"marker RMSE={np.sqrt(np.mean(residual**2)) * 1000:.1f} mm; "
+            f"thumb/index/middle/ring/pinky={np.round(per_finger, 1).tolist()} mm"
         )
         return True
 
@@ -162,6 +167,7 @@ class HandRetargeter:
         desired_world = desired_local @ palm_rotation.T + palm[0, :3]
         actual_world = self.robot.data.body_pose_w.torch[0, self.marker_ids, :3]
         error = desired_world - actual_world
+        self.marker_error_mm = torch.linalg.norm(error, dim=1).detach().cpu().numpy() * 1000.0
 
         marker_conf = torch.as_tensor(
             confidence[TRACKED_INDICES], dtype=torch.float32, device=self.robot.device
@@ -194,6 +200,14 @@ class HandRetargeter:
         alpha = float(self.cfg["target_smoothing"])
         self.target = alpha * candidate + (1.0 - alpha) * self.target
         return self.target
+
+    def diagnostic_summary(self) -> str:
+        per_finger = np.sqrt(np.mean(self.marker_error_mm.reshape(5, 3) ** 2, axis=1))
+        total = float(np.sqrt(np.mean(self.marker_error_mm ** 2)))
+        return (
+            f"{self.side} marker RMSE={total:.1f} mm; "
+            f"thumb/index/middle/ring/pinky={np.round(per_finger, 1).tolist()} mm"
+        )
 
     def calibration_dict(self) -> dict | None:
         if self.transform is None:
@@ -478,7 +492,16 @@ def main() -> None:
     )
     print(f"Listening for 21-point hand JSON on udp://{teleop_cfg['bind_host']}:{teleop_cfg['port']}")
     print(f"Retarget mode: {'hand only (arms fixed)' if args_cli.hand_only else 'hand + arm'}")
-    print("Hold each visible hand open and steady during calibration; recording starts automatically afterward.")
+    calibration_frames = int(teleop_cfg["calibration_frames"])
+    calibration_countdown_s = float(teleop_cfg.get("calibration_countdown_s", 3.0))
+    print(
+        f"CALIBRATION WAITING: show {', '.join(required_sides)} hand(s). A "
+        f"{calibration_countdown_s:g}s countdown starts after all are tracked."
+    )
+    print(
+        f"Then hold every required hand OPEN and STILL for {calibration_frames} valid frames "
+        f"(~{calibration_frames / 30.0:.1f}s at 30 Hz). Recording starts after completion."
+    )
 
     records: dict[str, list] = {
         "time": [], "tracker_timestamp": [], "keypoint_age": [], "input_valid": [],
@@ -503,8 +526,14 @@ def main() -> None:
     output_dir = args_cli.output_dir or resolve_path(config_path, teleop_cfg["output_dir"])
     last_packet_timestamp = np.nan
     last_sequence = -1
+    last_diagnostic_report = 0.0
     last_valid_input_time: dict[str, float | None] = {"left": None, "right": None}
     latest_observations: dict[str, tuple[np.ndarray, np.ndarray, PalmPose | None]] = {}
+    calibration_ready_since: float | None = None
+    calibration_capture_since: float | None = None
+    calibration_countdown_value: int | None = None
+    calibration_last_progress = 0
+    calibration_paused = False
 
     try:
         while simulation_app.is_running() and step < max_steps:
@@ -538,12 +567,65 @@ def main() -> None:
                         continue
                     latest_observations[side] = (local, filtered.confidence, filtered_palm)
                     updated_observations[side] = (local, filtered.confidence, filtered_palm)
-                    hand_retargeters[side].observe_calibration(local, filtered.confidence)
-                    if not args_cli.hand_only and filtered_palm is not None:
-                        arm_retargeters[side].observe_calibration(filtered_palm)
                 update_time = time.monotonic()
                 for side in updated_observations:
                     last_valid_input_time[side] = update_time
+
+                if not recording:
+                    all_required_visible = all(side in updated_observations for side in required_sides)
+                    if all_required_visible and calibration_ready_since is None:
+                        calibration_ready_since = update_time
+                        calibration_countdown_value = None
+                        print(
+                            "CALIBRATION HANDS DETECTED: keep all required hands open and still; "
+                            "countdown starting."
+                        )
+
+                    if all_required_visible and calibration_ready_since is not None:
+                        countdown_elapsed = update_time - calibration_ready_since
+                        if countdown_elapsed < calibration_countdown_s:
+                            remaining = max(
+                                1, int(math.ceil(calibration_countdown_s - countdown_elapsed))
+                            )
+                            if remaining != calibration_countdown_value:
+                                print(f"CALIBRATION STARTS IN {remaining}...")
+                                calibration_countdown_value = remaining
+                        else:
+                            if calibration_capture_since is None:
+                                calibration_capture_since = update_time
+                                print(
+                                    "CALIBRATION CAPTURE STARTED: HOLD OPEN + STILL until completion."
+                                )
+                            if calibration_paused:
+                                print("CALIBRATION RESUMED: all required hands tracked.")
+                                calibration_paused = False
+                            for side in required_sides:
+                                local, confidence, filtered_palm = updated_observations[side]
+                                hand_retargeters[side].observe_calibration(local, confidence)
+                                if not args_cli.hand_only and filtered_palm is not None:
+                                    arm_retargeters[side].observe_calibration(filtered_palm)
+                            captured = min(
+                                min(len(hand_retargeters[side].calibration_samples), calibration_frames)
+                                for side in required_sides
+                            )
+                            if captured > calibration_last_progress and (
+                                captured == 1
+                                or captured % 5 == 0
+                                or captured == calibration_frames
+                            ):
+                                elapsed = update_time - calibration_capture_since
+                                print(
+                                    f"CALIBRATION PROGRESS: {captured}/{calibration_frames} valid "
+                                    f"frames ({elapsed:.1f}s elapsed)."
+                                )
+                                calibration_last_progress = captured
+                    elif calibration_capture_since is None and calibration_ready_since is not None:
+                        print("CALIBRATION COUNTDOWN RESET: a required hand was lost.")
+                        calibration_ready_since = None
+                        calibration_countdown_value = None
+                    elif calibration_capture_since is not None and not calibration_paused:
+                        print("CALIBRATION PAUSED: required hand lost; show it again to continue.")
+                        calibration_paused = True
 
             now = time.monotonic()
             valid_ages = {
@@ -565,7 +647,14 @@ def main() -> None:
             ):
                 recording = True
                 start_time = time.monotonic()
-                print(f"Required hands calibrated ({', '.join(required_sides)}); episode recording started.")
+                calibration_elapsed = (
+                    time.monotonic() - calibration_capture_since
+                    if calibration_capture_since is not None else float("nan")
+                )
+                print(
+                    f"CALIBRATION COMPLETE in {calibration_elapsed:.1f}s "
+                    f"({', '.join(required_sides)}). EPISODE RECORDING STARTED."
+                )
 
             if new_packet:
                 for side, (local, confidence, filtered_palm) in updated_observations.items():
@@ -585,6 +674,15 @@ def main() -> None:
                         robot.set_joint_position_target_index(
                             target=arm_target, joint_ids=arm_retargeter.joint_ids
                         )
+                diagnostic_now = time.monotonic()
+                if args_cli.diagnostics and diagnostic_now - last_diagnostic_report >= 1.0:
+                    for side in required_sides:
+                        hand_retargeter = hand_retargeters[side]
+                        if hand_retargeter.calibrated and np.isfinite(
+                            hand_retargeter.marker_error_mm
+                        ).any():
+                            print(hand_retargeter.diagnostic_summary())
+                    last_diagnostic_report = diagnostic_now
 
             robot.write_data_to_sim()
             object_asset.write_data_to_sim()

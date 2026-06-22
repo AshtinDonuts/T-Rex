@@ -35,6 +35,7 @@ keypoint_teleop:
   palm_rotation_alpha: 0.25
   max_palm_jump_m: 0.10
   max_palm_jump_rad: 0.7
+  calibration_countdown_s: 3.0
   calibration_frames: 30
   # Rotation from the keypoint camera frame into the robot base frame. This
   # Identity is sufficient for hand-only testing. Calibrate this D405-camera

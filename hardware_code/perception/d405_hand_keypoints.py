@@ -13,6 +13,17 @@ from typing import Callable, Sequence
 import numpy as np
 
 
+HAND_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (0, 9), (9, 10), (10, 11), (11, 12),
+    (0, 13), (13, 14), (14, 15), (15, 16),
+    (0, 17), (17, 18), (18, 19), (19, 20),
+    (5, 9), (9, 13), (13, 17),
+)
+FINGERTIP_INDICES = (4, 8, 12, 16, 20)
+
+
 def robust_depth_m(
     depth_m: np.ndarray,
     u: int,
@@ -62,6 +73,42 @@ def lift_landmarks(
     return output
 
 
+def hand_geometry_diagnostics(
+    keypoints: np.ndarray,
+    max_bone_m: float = 0.09,
+    max_depth_jump_m: float = 0.04,
+) -> dict[str, object]:
+    """Summarize metric hand geometry and identify likely depth-lifting outliers."""
+    keypoints = np.asarray(keypoints, dtype=np.float64)
+    if keypoints.shape != (21, 4):
+        raise ValueError(f"Expected keypoints (21, 4), got {keypoints.shape}")
+    valid = keypoints[:, 3] > 0.0
+    lengths = []
+    suspicious: set[int] = set()
+    for start, end in HAND_CONNECTIONS:
+        if not (valid[start] and valid[end]):
+            continue
+        delta = keypoints[end, :3] - keypoints[start, :3]
+        length = float(np.linalg.norm(delta))
+        lengths.append(length)
+        if length > max_bone_m or abs(float(delta[2])) > max_depth_jump_m:
+            suspicious.update((start, end))
+    palm_width = (
+        float(np.linalg.norm(keypoints[5, :3] - keypoints[17, :3]))
+        if valid[5] and valid[17]
+        else np.nan
+    )
+    valid_depths = keypoints[valid, 2]
+    return {
+        "valid_count": int(valid.sum()),
+        "palm_width_m": palm_width,
+        "median_bone_m": float(np.median(lengths)) if lengths else np.nan,
+        "max_bone_m": float(np.max(lengths)) if lengths else np.nan,
+        "depth_span_m": float(np.ptp(valid_depths)) if valid_depths.size else np.nan,
+        "suspicious_indices": sorted(suspicious),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True, help="MediaPipe hand_landmarker.task")
@@ -83,6 +130,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--swap-handedness", action="store_true")
     parser.add_argument("--no-align", action="store_true", help="Skip depth-to-color alignment")
     parser.add_argument("--preview", action="store_true")
+    parser.add_argument(
+        "--diagnostics", action="store_true",
+        help="Show aligned depth, landmark depths, and suspicious 3D hand segments",
+    )
+    parser.add_argument("--diagnostic-max-bone-m", type=float, default=0.09)
+    parser.add_argument("--diagnostic-max-depth-jump-m", type=float, default=0.04)
     return parser.parse_args()
 
 
@@ -127,6 +180,7 @@ def main() -> None:
     previous_timestamp_ms = -1
     sent = 0
     report_start = time.monotonic()
+    latest_diagnostics: list[str] = []
 
     try:
         # Let auto-exposure settle before inference/calibration packets begin.
@@ -159,7 +213,18 @@ def main() -> None:
                 "frame_id": args.frame_id,
             }
             selected_scores: dict[str, float] = {}
-            preview = cv2.cvtColor(color_rgb, cv2.COLOR_RGB2BGR) if args.preview else None
+            show_preview = args.preview or args.diagnostics
+            preview = cv2.cvtColor(color_rgb, cv2.COLOR_RGB2BGR) if show_preview else None
+            depth_preview = None
+            frame_diagnostics: list[str] = []
+            if args.diagnostics:
+                depth_u8 = np.clip(
+                    (depth_m - args.min_depth_m) / (args.max_depth_m - args.min_depth_m) * 255.0,
+                    0,
+                    255,
+                ).astype(np.uint8)
+                depth_preview = cv2.applyColorMap(255 - depth_u8, cv2.COLORMAP_TURBO)
+                depth_preview[depth_raw == 0] = 0
             for hand_index, landmarks in enumerate(result.hand_landmarks):
                 category = result.handedness[hand_index][0]
                 side = category.category_name.lower()
@@ -179,28 +244,61 @@ def main() -> None:
                     args.min_valid_depth_pixels,
                 )
                 valid_count = int(np.count_nonzero(keypoints[:, 3] > 0.0))
+                diagnostic = hand_geometry_diagnostics(
+                    keypoints,
+                    args.diagnostic_max_bone_m,
+                    args.diagnostic_max_depth_jump_m,
+                )
+                suspicious = set(diagnostic["suspicious_indices"])
+                frame_diagnostics.append(
+                    f"{side}: valid={valid_count}/21 palm={diagnostic['palm_width_m'] * 1000:.0f}mm "
+                    f"bone_med/max={diagnostic['median_bone_m'] * 1000:.0f}/"
+                    f"{diagnostic['max_bone_m'] * 1000:.0f}mm "
+                    f"z_span={diagnostic['depth_span_m'] * 1000:.0f}mm suspicious={sorted(suspicious)}"
+                )
+                if preview is not None:
+                    color = (80, 220, 80) if side == "right" else (220, 160, 40)
+                    image_height, image_width = color_rgb.shape[:2]
+                    pixels = [
+                        (int(point[0] * image_width), int(point[1] * image_height))
+                        for point in normalized_xy
+                    ]
+                    for start, end in HAND_CONNECTIONS:
+                        if keypoints[start, 3] > 0 and keypoints[end, 3] > 0:
+                            line_color = (0, 0, 255) if start in suspicious or end in suspicious else color
+                            cv2.line(preview, pixels[start], pixels[end], line_color, 1)
+                            if depth_preview is not None:
+                                cv2.line(depth_preview, pixels[start], pixels[end], line_color, 1)
+                    for index, (pixel, confidence) in enumerate(zip(pixels, keypoints[:, 3])):
+                        if confidence > 0:
+                            point_color = (0, 0, 255) if index in suspicious else color
+                            cv2.circle(preview, pixel, 3, point_color, -1)
+                            if depth_preview is not None:
+                                cv2.circle(depth_preview, pixel, 3, point_color, -1)
+                            if args.diagnostics and index in FINGERTIP_INDICES:
+                                label = f"{index}:{keypoints[index, 2] * 1000:.0f}"
+                                cv2.putText(
+                                    preview, label, (pixel[0] + 4, pixel[1] - 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, point_color, 1,
+                                )
+                    cv2.putText(
+                        preview, f"{side} {valid_count}/21", (10, 30 + 30 * hand_index),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2,
+                    )
                 if valid_count < args.min_valid_landmarks:
                     continue
                 # If duplicate labels occur, retain the higher-confidence detection.
                 if side not in selected_scores or category.score > selected_scores[side]:
                     packet[side] = {"keypoints": keypoints.tolist()}
                     selected_scores[side] = float(category.score)
-                if preview is not None:
-                    color = (80, 220, 80) if side == "right" else (220, 160, 40)
-                    image_height, image_width = color_rgb.shape[:2]
-                    for point, confidence in zip(normalized_xy, keypoints[:, 3]):
-                        if confidence > 0:
-                            pixel = (int(point[0] * image_width), int(point[1] * image_height))
-                            cv2.circle(preview, pixel, 3, color, -1)
-                    cv2.putText(
-                        preview, f"{side} {valid_count}/21", (10, 30 + 30 * hand_index),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2,
-                    )
+            latest_diagnostics = frame_diagnostics
             if "left" in packet or "right" in packet:
                 udp.sendto(json.dumps(packet, separators=(",", ":")).encode("utf-8"), destination)
                 sent += 1
 
             if preview is not None:
+                if depth_preview is not None:
+                    preview = np.hstack((preview, depth_preview))
                 cv2.imshow("D405 hand keypoints (q/esc to quit)", preview)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27):
@@ -208,13 +306,16 @@ def main() -> None:
             now = time.monotonic()
             if now - report_start >= 2.0:
                 print(f"publishing {sent / (now - report_start):.1f} packets/s to udp://{args.host}:{args.port}")
+                if args.diagnostics:
+                    for message in latest_diagnostics:
+                        print(f"  {message}")
                 sent = 0
                 report_start = now
     finally:
         landmarker.close()
         pipeline.stop()
         udp.close()
-        if args.preview:
+        if args.preview or args.diagnostics:
             cv2.destroyAllWindows()
 
 

@@ -7,6 +7,8 @@ evaluation for the fixed-base DexMate Vega-1 with two 22-DoF Sharpa Wave hands.
 
 ### 1. Prepare the asset once
 
+Run this in any terminal, then wait for it to finish:
+
 ```bash
 cd /home/khw/RoCoIROS26/T-Rex
 hardware_code/eval/isaac_lab/prepare_asset.sh
@@ -17,7 +19,8 @@ Set `ISAACLAB_ROOT` first if Isaac Lab is not at `/home/khw/IsaacLab`.
 ### 2. Start the D405 keypoint sender
 
 Create a small, separate environment so MediaPipe and RealSense do not alter
-the Isaac Lab environment:
+the Isaac Lab environment. Run this in **Terminal 1** and leave the sender
+running during either retargeting test:
 
 ```bash
 cd /home/khw/RoCoIROS26/T-Rex
@@ -28,7 +31,7 @@ source .venv-d405/bin/activate
 hardware_code/perception/download_hand_landmarker.sh
 python hardware_code/perception/d405_hand_keypoints.py \
   --model hardware_code/perception/models/hand_landmarker.task \
-  --preview
+  --diagnostics
 ```
 
 Keep the hand within the D405 depth range and check that most points show in
@@ -36,25 +39,37 @@ the preview. Add `--swap-handedness` if left and right are reversed. The sender
 aligns depth to RGB, lifts MediaPipe's 21 image landmarks into metric D405 XYZ,
 and publishes `frame_id: "d405"` to UDP port `7001`.
 
+Diagnostic mode shows RGB beside aligned depth. Fingertip labels are
+`landmark_index:depth_mm`; red segments indicate an unusually long 3D bone or
+large depth discontinuity, often caused by sampling the background.
+
 For one-hand testing, change `required_sides` in `trex_isaac.yaml` to `[right]`
-or `[left]`. Keep `[left, right]` for bimanual testing. Hold each required hand
-open and steady for the first 30 valid packets.
+or `[left]`. Keep `[left, right]` for bimanual testing. After all required hands
+are visible, Isaac prints a three-second countdown. Keep them open and still
+during the countdown and the following 30-frame capture; the console prints
+progress, pause/resume events, completion, and recording start.
 
 ### 3A. Test hand-only retargeting
 
-The Wave fingers move while both DexMate arms remain fixed.
+With the D405 sender still running in Terminal 1, open **Terminal 2** and run
+the following. The Wave fingers move while both DexMate arms remain fixed.
 
 ```bash
 cd /home/khw/RoCoIROS26/T-Rex
 hardware_code/eval/isaac_lab/run_keypoint_teleop.sh \
-  --hand-only --viz kit \
+  --hand-only --diagnostics --viz kit \
   --output-dir /tmp/trex_hand_only
 ```
 
 Confirm that each simulated fingertip follows its corresponding human
-fingertip before enabling arm movement.
+fingertip before enabling arm movement. The console reports total and
+per-finger marker errors once per second, which separates a bad camera lift
+from a finger-specific Sharpa fit or IK problem.
 
 ### 3B. Test hand + arm retargeting
+
+Stop the hand-only run in Terminal 2 before starting this test; do not run 3A
+and 3B simultaneously. Keep the D405 sender running in Terminal 1.
 
 First calibrate `camera_to_robot_quaternion_wxyz` for the physical D405 mount
 and verify `arm_workspace` in `trex_isaac.yaml`. The identity default is only a
@@ -70,6 +85,8 @@ Palm translation/orientation drives each 7-DoF arm; palm-normalized landmarks
 drive the Wave fingers.
 
 ### 4. Check both recordings
+
+After each Isaac run has stopped, run this in either terminal:
 
 ```bash
 python - <<'PY'
@@ -103,7 +120,8 @@ the episode. Commands remain actuator targets, so PhysX contact is active.
 
 ## T-Rex checkpoint evaluation
 
-Start the inference server in the T-Rex environment:
+In **Terminal 1**, start the inference server in the T-Rex environment and
+leave it running:
 
 ```bash
 python scripts/test.py \
@@ -114,7 +132,7 @@ python scripts/test.py \
   --port 5678
 ```
 
-Then run Isaac Lab in another terminal:
+In **Terminal 2**, run Isaac Lab:
 
 ```bash
 # Asset/camera smoke test

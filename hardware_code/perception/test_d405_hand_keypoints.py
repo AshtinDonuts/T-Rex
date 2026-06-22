@@ -2,10 +2,23 @@ import unittest
 
 import numpy as np
 
-from d405_hand_keypoints import lift_landmarks, robust_depth_m
+from d405_hand_keypoints import hand_geometry_diagnostics, lift_landmarks, robust_depth_m
 
 
 class D405KeypointTest(unittest.TestCase):
+    def test_geometry_diagnostics_flags_depth_outlier(self):
+        points = np.zeros((21, 4), dtype=float)
+        points[:, 3] = 1.0
+        for finger, start in enumerate((1, 5, 9, 13, 17)):
+            x = (finger - 2) * 0.015
+            for offset in range(4):
+                points[start + offset, :3] = [x, 0.03 + offset * 0.02, 0.30]
+        points[8, 2] = 0.42
+        result = hand_geometry_diagnostics(points)
+        self.assertEqual(result["valid_count"], 21)
+        self.assertIn(8, result["suspicious_indices"])
+        self.assertGreater(result["depth_span_m"], 0.1)
+
     def test_robust_depth_rejects_holes_and_outlier(self):
         depth = np.zeros((9, 9), dtype=np.float32)
         depth[2:7, 2:7] = 0.25
