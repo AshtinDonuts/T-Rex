@@ -641,6 +641,15 @@ def main() -> None:
     calibration_countdown_value: int | None = None
     calibration_last_progress = 0
     calibration_paused = False
+    stale_hold_timeout_s = float(
+        teleop_cfg.get("stale_hold_timeout_s", teleop_cfg.get("abort_timeout_s", 2.0))
+    )
+    stale_report_interval_s = float(teleop_cfg.get("stale_report_interval_s", 5.0))
+    stale_hold_active = False
+    stale_hold_started = 0.0
+    stale_last_report = 0.0
+    frozen_joint_targets: torch.Tensor | None = None
+    all_joint_ids = list(range(robot.num_joints))
 
     try:
         while simulation_app.is_running() and step < max_steps:
@@ -740,12 +749,43 @@ def main() -> None:
                 for side, timestamp in last_valid_input_time.items()
             }
             valid_age = max(valid_ages[side] for side in required_sides)
-            if recording and valid_age > float(teleop_cfg["abort_timeout_s"]):
+            stream_stale = recording and valid_age > stale_hold_timeout_s
+            if stream_stale:
+                if not stale_hold_active:
+                    stale_hold_active = True
+                    stale_hold_started = now
+                    stale_last_report = now
+                    frozen_joint_targets = robot.data.joint_pos.torch.clone()
+                    for side in ("left", "right"):
+                        hand = hand_retargeters[side]
+                        arm = arm_retargeters[side]
+                        hand.target = frozen_joint_targets[:, hand.joint_ids].clone()
+                        arm.target_joint_pos = frozen_joint_targets[:, arm.joint_ids].clone()
+                        ee_pose = robot.data.body_pose_w.torch[0, arm.ee_body_id]
+                        ee_rotation = matrix_from_quat(ee_pose[3:7].unsqueeze(0))[0]
+                        arm.target_pose = PalmPose(
+                            ee_pose[:3].detach().cpu().numpy(),
+                            ee_rotation.detach().cpu().numpy(),
+                        )
+                        arm.position_error = np.zeros(3, dtype=np.float64)
+                        arm.rotation_error = np.zeros(3, dtype=np.float64)
+                    print(
+                        f"KEYPOINT STREAM STALE ({valid_age:.2f}s): holding the entire robot "
+                        "still. Episode remains active; waiting for valid tracking."
+                    )
+                elif now - stale_last_report >= stale_report_interval_s:
+                    print(
+                        f"KEYPOINT STREAM STILL STALE: robot held for "
+                        f"{now - stale_hold_started:.1f}s; waiting for valid tracking."
+                    )
+                    stale_last_report = now
+            elif stale_hold_active:
                 print(
-                    f"Valid keypoint stream stale for {valid_age:.2f}s; "
-                    "ending episode while holding targets."
+                    f"KEYPOINT STREAM RECOVERED after {now - stale_hold_started:.1f}s: "
+                    "resuming retargeting from the held robot pose."
                 )
-                break
+                stale_hold_active = False
+                frozen_joint_targets = None
 
             if not recording and all(
                 hand_retargeters[side].calibrated
@@ -763,7 +803,7 @@ def main() -> None:
                     f"({', '.join(required_sides)}). EPISODE RECORDING STARTED."
                 )
 
-            if new_packet:
+            if new_packet and not stale_hold_active:
                 for side, (local, confidence, filtered_palm) in updated_observations.items():
                     hand_retargeter = hand_retargeters[side]
                     arm_retargeter = arm_retargeters[side]
@@ -791,7 +831,12 @@ def main() -> None:
                             print(hand_retargeter.diagnostic_summary())
                     last_diagnostic_report = diagnostic_now
 
-            if args_cli.hand_only:
+            if stale_hold_active:
+                assert frozen_joint_targets is not None
+                hold_joints_at_targets(
+                    robot, all_joint_ids, frozen_joint_targets, before_sim_write=True
+                )
+            elif args_cli.hand_only:
                 hold_joints_at_targets(
                     robot, fixed_joint_ids, fixed_joint_targets, before_sim_write=True
                 )
@@ -799,7 +844,12 @@ def main() -> None:
             robot.write_data_to_sim()
             if object_asset is not None:
                 object_asset.write_data_to_sim()
-            if args_cli.hand_only:
+            if stale_hold_active:
+                assert frozen_joint_targets is not None
+                hold_joints_at_targets(
+                    robot, all_joint_ids, frozen_joint_targets, before_sim_write=False
+                )
+            elif args_cli.hand_only:
                 hold_joints_at_targets(
                     robot, fixed_joint_ids, fixed_joint_targets, before_sim_write=False
                 )
@@ -884,6 +934,7 @@ def main() -> None:
             "retarget_mode": "hand_only" if args_cli.hand_only else "hand_and_arm",
             "diagnostic_scene": bool(args_cli.diagnostics),
             "required_sides": required_sides,
+            "stale_hold_timeout_s": stale_hold_timeout_s,
             "simulation_dt": sim_cfg["dt"],
             "record_stride": teleop_cfg["record_stride"],
             "fps": 1.0 / (sim_cfg["dt"] * teleop_cfg["record_stride"]),

@@ -50,7 +50,9 @@ keypoint_teleop:
   arm_workspace:
     left: {min: [0.15, -0.8, 0.35], max: [1.15, 0.8, 1.55]}
     right: {min: [0.15, -0.8, 0.35], max: [1.15, 0.8, 1.55]}
-  abort_timeout_s: 2.0
+  # After this tracking gap, freeze every robot joint until valid input returns.
+  stale_hold_timeout_s: 2.0
+  stale_report_interval_s: 5.0
   ik_damping: 0.04
   neutral_regularization: 0.002
   max_joint_step: 0.08

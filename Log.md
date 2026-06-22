@@ -1,3 +1,21 @@
+## Jun 22 1700
+
+Dealing with:
+
+1. Early exit from lost tracking (i.e. disable the exit early behavior)
+2. Setting up a reference pose that corresponds to robot starting wrist pose (position + orientation).
+* capture an image as reference pose
+
+
+## Jun 22 1630
+
+Fixed robot body from drooping in hand-only mode teleop.
+
+In progress:
+Debug why hand pose detection is worse when palm faces camera.
+Calibrate -> natural robot teleop pose.
+
+
 ## Jun 22 1430
 
 Implemented tracker-free D405 teleoperation for collecting Isaac demonstrations.

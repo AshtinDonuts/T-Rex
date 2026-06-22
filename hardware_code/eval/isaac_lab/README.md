@@ -121,8 +121,11 @@ Important settings are under `keypoint_teleop` in `trex_isaac.yaml`:
 - `calibration_frames`, filtering, IK, smoothing, and timeout parameters.
 
 The default 60 Hz simulation is recorded every second step, producing 30 Hz
-demonstrations. Short tracking gaps hold the previous targets; a long gap ends
-the episode. Commands remain actuator targets, so PhysX contact is active.
+demonstrations. Short tracking gaps hold the previous targets. After
+`stale_hold_timeout_s`, every robot joint is frozen at its current position and
+the episode remains active. Retargeting resumes automatically when valid input
+returns; warnings repeat every `stale_report_interval_s`. Commands remain
+actuator targets during normal tracking, so PhysX contact is active.
 
 ## T-Rex checkpoint evaluation
 
