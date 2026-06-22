@@ -1,144 +1,131 @@
-# T-Rex checkpoint evaluation in Isaac Lab
+# T-Rex in Isaac Lab
 
-This client runs the bimanual T-Rex policy closed-loop in one Isaac Lab scene.
-It assembles the bundled Vega-1 and **22-DoF Sharpa Wave** URDFs, renders head
-and wrist RGB observations, sends the standard 62-D state to the existing ZMQ
-inference server, and executes returned delta-EEF/absolute-hand actions.
+This directory contains keypoint teleoperation/collection and T-Rex checkpoint
+evaluation for the fixed-base DexMate Vega-1 with two 22-DoF Sharpa Wave hands.
 
-This is a simulation smoke-test environment, not a reproduction of a paper
-task. Camera extrinsics, objects, lighting, and dynamics should be tuned to the
-checkpoint's post-training data before interpreting task success.
+## Keypoint retargeting quickstart
 
-## 1. Prepare the robot asset
+### 1. Prepare the asset once
 
 ```bash
 cd /home/khw/RoCoIROS26/T-Rex
 hardware_code/eval/isaac_lab/prepare_asset.sh
 ```
 
-Set `ISAACLAB_ROOT` if Isaac Lab is elsewhere. The script builds a combined
-URDF with absolute mesh paths, swaps Vega `.glb` visuals for renderable `.obj`
-meshes (Isaac Sim's URDF importer skips GLB visuals), checks in neither generated
-meshes nor copied third-party assets, and converts it to a fixed-base USD.
-Run it again after changing the hand mount transforms or source URDFs; it removes
-the stale converted USD before importing the rebuilt asset.
+Set `ISAACLAB_ROOT` first if Isaac Lab is not at `/home/khw/IsaacLab`.
 
-## 2. Start T-Rex inference
+### 2. Start the D405 keypoint sender
 
-Use the Python environment in which T-Rex is installed:
+Create a small, separate environment so MediaPipe and RealSense do not alter
+the Isaac Lab environment:
 
 ```bash
 cd /home/khw/RoCoIROS26/T-Rex
+python3 -m venv .venv-d405
+source .venv-d405/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r hardware_code/perception/requirements-d405.txt
+hardware_code/perception/download_hand_landmarker.sh
+python hardware_code/perception/d405_hand_keypoints.py \
+  --model hardware_code/perception/models/hand_landmarker.task \
+  --preview
+```
+
+Keep the hand within the D405 depth range and check that most points show in
+the preview. Add `--swap-handedness` if left and right are reversed. The sender
+aligns depth to RGB, lifts MediaPipe's 21 image landmarks into metric D405 XYZ,
+and publishes `frame_id: "d405"` to UDP port `7001`.
+
+For one-hand testing, change `required_sides` in `trex_isaac.yaml` to `[right]`
+or `[left]`. Keep `[left, right]` for bimanual testing. Hold each required hand
+open and steady for the first 30 valid packets.
+
+### 3A. Test hand-only retargeting
+
+The Wave fingers move while both DexMate arms remain fixed.
+
+```bash
+cd /home/khw/RoCoIROS26/T-Rex
+hardware_code/eval/isaac_lab/run_keypoint_teleop.sh \
+  --hand-only --viz kit \
+  --output-dir /tmp/trex_hand_only
+```
+
+Confirm that each simulated fingertip follows its corresponding human
+fingertip before enabling arm movement.
+
+### 3B. Test hand + arm retargeting
+
+First calibrate `camera_to_robot_quaternion_wxyz` for the physical D405 mount
+and verify `arm_workspace` in `trex_isaac.yaml`. The identity default is only a
+safe starting point for hand-only testing; arm motion uses metric camera XYZ.
+
+```bash
+hardware_code/eval/isaac_lab/run_keypoint_teleop.sh \
+  --viz kit \
+  --output-dir /tmp/trex_hand_and_arm
+```
+
+Palm translation/orientation drives each 7-DoF arm; palm-normalized landmarks
+drive the Wave fingers.
+
+### 4. Check both recordings
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import numpy as np
+
+for root in (Path('/tmp/trex_hand_only'), Path('/tmp/trex_hand_and_arm')):
+    episode = sorted(root.glob('episode_*'))[-1]
+    data = np.load(episode / 'trajectory.npz')
+    print(root.name, data['observation_state'].shape, data['action'].shape)
+PY
+```
+
+Both arrays should be `(frames, 58)` in
+`[L arm 7 | L hand 22 | R arm 7 | R hand 22]` order. Add `--no-images` for a
+smaller smoke test or `--max-steps N` for a shorter run.
+
+## Keypoint configuration
+
+Important settings are under `keypoint_teleop` in `trex_isaac.yaml`:
+
+- `required_sides`: hands required to complete calibration.
+- `keypoint_frame_id`: accepted source coordinate frame.
+- `camera_to_robot_quaternion_wxyz`: source-frame to robot-base rotation.
+- `arm_workspace`: permitted EEF translation bounds.
+- `calibration_frames`, filtering, IK, smoothing, and timeout parameters.
+
+The default 60 Hz simulation is recorded every second step, producing 30 Hz
+demonstrations. Short tracking gaps hold the previous targets; a long gap ends
+the episode. Commands remain actuator targets, so PhysX contact is active.
+
+## T-Rex checkpoint evaluation
+
+Start the inference server in the T-Rex environment:
+
+```bash
 python scripts/test.py \
   --checkpoint_path /path/to/checkpoint \
   --dataset_name YOUR_STATS_KEY \
   --action_dim 62 --action_chunk 16 \
-  --use_robot_state 1 \
-  --disable_tactile 1 \
+  --use_robot_state 1 --disable_tactile 1 \
   --port 5678
 ```
 
-Keep the checkpoint's normal image-size and architecture arguments if it needs
-explicit overrides. `--disable_tactile 1` is intentional: the first evaluator
-version has RGB and proprioception but no simulated Wave deform maps. The
-server therefore returns a full action-expert chunk for `mode="slow"`.
-
-## 3. Run the simulation
-
-Isaac Lab runs under Isaac Sim's bundled Python (3.12), not the T-Rex training
-conda env. The helper scripts unset `CONDA_PREFIX` automatically so you can
-keep the inference server running in `(trex)` in another terminal.
-
-First verify the asset, joint mapping, and cameras without the checkpoint:
+Then run Isaac Lab in another terminal:
 
 ```bash
+# Asset/camera smoke test
 hardware_code/eval/isaac_lab/run_eval.sh --dry-run --viz none
-```
 
-Then run with a GUI:
-
-```bash
+# Closed-loop policy evaluation
 hardware_code/eval/isaac_lab/run_eval.sh \
   --task-description "Pick up the red object." --viz kit
 ```
 
-For headless evaluation, use `--viz none`. Edit `trex_isaac.yaml` to change
-the endpoint, camera extrinsics, table/object geometry, initial pose, episode
-length, or controller gains.
-
-## Interface details
-
-- State order: left EEF xyz + rot6d + 22 Wave joints, then right side (62-D).
-- Action order: local delta xyz + delta rot6d + 22 absolute Wave targets per side.
-- Every returned action is relative to the EEF poses at that chunk's start.
-- The evaluator resolves the 22 joints per hand in explicit Sharpa SDK/policy
-order (not PhysX topology order) and stops if any mapped joint is absent.
-- Tactile refinement is deliberately not faked with zero inputs. Add a contact
-  sensor-to-F6/deform model before enabling the cascaded fast requests.
-
-## Keypoint teleoperation and collection
-
-`teleop_sharpa_keypoints.py` retargets tracker-independent 21-point hand
-keypoints to both 7-DoF DexMate arms and both 22-DoF Wave hands. It does not use
-Manus or VIVE. The first stable open-hand frames calibrate human palm motion
-against the initial simulated end-effector poses and fit hand geometry into the
-actual Wave geometry. Later frames use global palm SE(3) motion for arm targets
-and palm-normalized landmarks for finger targets. Commands are actuator
-position targets, so PhysX contacts remain active rather than having joint
-state overwritten.
-
-Prepare the asset as above, then run:
-
-```bash
-hardware_code/eval/isaac_lab/run_keypoint_teleop.sh --viz kit
-```
-
-The default receiver listens on UDP port 7001. Each datagram is UTF-8 JSON:
-
-```json
-{
-  "timestamp": 1710000000.125,
-  "frame_id": "head_camera",
-  "left": {"keypoints": [[0.0, 0.0, 0.0, 0.99]]},
-  "right": {"keypoints": [[0.0, 0.0, 0.0, 0.99]]}
-}
-```
-
-Each `keypoints` array must contain 21 rows in MediaPipe/OpenPose hand order.
-Rows are `[x, y, z]` or `[x, y, z, confidence]`. For arm motion, coordinates
-must be metric, have stable scale, and remain in the named camera/world frame;
-all hands in a packet must use that same frame. The abbreviated arrays above
-illustrate the schema only and are not valid packets.
-
-Set `camera_to_robot_quaternion_wxyz` to the calibrated rotation from the
-`keypoint_frame_id` into the robot base frame. Packets with a different frame
-ID are rejected. The default rotation matches the configured
-fixed head camera. Translation is unnecessary because arm retargeting uses
-motion relative to the calibration pose. If the perception system is monocular
-and does not produce stable metric depth, add depth/stereo fusion before using
-arm translation; palm normalization hides scale errors from finger IK but arm
-targets cannot.
-
-Hold each required hand open and steady for `calibration_frames`. Recording
-starts automatically after calibration and stops at `max_steps` or when the
-application closes. Episodes are saved under `keypoint_teleop.output_dir` as:
-
-- `trajectory.npz`: canonical 58-D `observation_state` and `action` arrays in
-  `[L arm 7 | L hand 22 | R arm 7 | R hand 22]` order, component targets and
-  states, palm/EEF poses, IK residuals, object state, and optional RGB images
-  packed as concatenated JPEG bytes plus frame offsets.
-- `metadata.json`: exact 58-D joint order, camera-to-base rotation, timing,
-  keypoint indices, and fitted arm/hand calibrations.
-
-The default `record_stride: 2` converts the 60 Hz simulation loop to the T-Rex
-dataset's canonical 30 Hz sample rate.
-
-Only new UDP datagrams update targets. Short dropouts hold the last safe target;
-an active episode ends after `abort_timeout_s`. Arm targets are constrained by
-per-side workspace bounds, joint limits, bounded joint steps, posture
-regularization, and smoothing. Review `arm_workspace` and the camera rotation
-for every deployment.
-
-Set `required_sides: [right]` for one-handed operation. `--no-images` reduces
-recording size, while `--output-dir` and `--max-steps` override their YAML
-counterparts.
+The evaluator uses a 62-D interface per step: left EEF xyz + rot6d + 22 hand
+joints, followed by the right side. Returned actions contain local EEF deltas
+and absolute hand targets. This environment has RGB and proprioception but no
+simulated Wave tactile/deformation observations, hence `--disable_tactile 1`.

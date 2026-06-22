@@ -139,6 +139,7 @@ class KeypointFilter:
         self.min_confidence = min_confidence
         self.max_jump_m = max_jump_m
         self._state: dict[str, np.ndarray] = {}
+        self._valid_state: dict[str, np.ndarray] = {}
 
     def update(self, side: str, sample: HandSample) -> HandSample | None:
         valid = sample.confidence >= self.min_confidence
@@ -147,11 +148,17 @@ class KeypointFilter:
         previous = self._state.get(side)
         current = sample.xyz.copy()
         if previous is not None:
+            previous_valid = self._valid_state[side]
             jumps = np.linalg.norm(current - previous, axis=1)
-            accept = valid & (jumps <= self.max_jump_m)
+            newly_valid = valid & ~previous_valid
+            accept = newly_valid | (valid & (jumps <= self.max_jump_m))
             current[~accept] = previous[~accept]
-            current = self.alpha * current + (1.0 - self.alpha) * previous
+            smoothed = self.alpha * current + (1.0 - self.alpha) * previous
+            smoothed[newly_valid] = current[newly_valid]
+            current = smoothed
+            valid = previous_valid | valid
         self._state[side] = current
+        self._valid_state[side] = valid.copy()
         return HandSample(current.copy(), sample.confidence.copy())
 
 

@@ -14,6 +14,9 @@ parser.add_argument("--config", type=Path, default=Path(__file__).with_name("tre
 parser.add_argument("--output-dir", type=Path, default=None)
 parser.add_argument("--max-steps", type=int, default=None)
 parser.add_argument("--no-images", action="store_true")
+parser.add_argument(
+    "--hand-only", action="store_true", help="Retarget Wave fingers while holding DexMate arms fixed."
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
@@ -474,6 +477,7 @@ def main() -> None:
         float(teleop_cfg["max_palm_jump_rad"]),
     )
     print(f"Listening for 21-point hand JSON on udp://{teleop_cfg['bind_host']}:{teleop_cfg['port']}")
+    print(f"Retarget mode: {'hand only (arms fixed)' if args_cli.hand_only else 'hand + arm'}")
     print("Hold each visible hand open and steady during calibration; recording starts automatically afterward.")
 
     records: dict[str, list] = {
@@ -500,13 +504,13 @@ def main() -> None:
     last_packet_timestamp = np.nan
     last_sequence = -1
     last_valid_input_time: dict[str, float | None] = {"left": None, "right": None}
-    latest_observations: dict[str, tuple[np.ndarray, np.ndarray, PalmPose]] = {}
+    latest_observations: dict[str, tuple[np.ndarray, np.ndarray, PalmPose | None]] = {}
 
     try:
         while simulation_app.is_running() and step < max_steps:
             packet, sequence, _transport_age, error = receiver.latest()
             new_packet = packet is not None and sequence != last_sequence
-            updated_observations: dict[str, tuple[np.ndarray, np.ndarray, PalmPose]] = {}
+            updated_observations: dict[str, tuple[np.ndarray, np.ndarray, PalmPose | None]] = {}
             if error and step % 120 == 0:
                 print(f"Ignoring malformed keypoint packet: {error}")
             if new_packet:
@@ -524,15 +528,19 @@ def main() -> None:
                         continue
                     try:
                         local, _, _, _ = palm_normalize(filtered)
-                        filtered_palm = palm_filter.update(side, palm_pose(filtered))
                     except ValueError:
                         continue
-                    if filtered_palm is None:
+                    try:
+                        filtered_palm = palm_filter.update(side, palm_pose(filtered))
+                    except ValueError:
+                        filtered_palm = None
+                    if filtered_palm is None and not args_cli.hand_only:
                         continue
                     latest_observations[side] = (local, filtered.confidence, filtered_palm)
                     updated_observations[side] = (local, filtered.confidence, filtered_palm)
                     hand_retargeters[side].observe_calibration(local, filtered.confidence)
-                    arm_retargeters[side].observe_calibration(filtered_palm)
+                    if not args_cli.hand_only and filtered_palm is not None:
+                        arm_retargeters[side].observe_calibration(filtered_palm)
                 update_time = time.monotonic()
                 for side in updated_observations:
                     last_valid_input_time[side] = update_time
@@ -551,7 +559,8 @@ def main() -> None:
                 break
 
             if not recording and all(
-                hand_retargeters[side].calibrated and arm_retargeters[side].calibrated
+                hand_retargeters[side].calibrated
+                and (args_cli.hand_only or arm_retargeters[side].calibrated)
                 for side in required_sides
             ):
                 recording = True
@@ -562,12 +571,17 @@ def main() -> None:
                 for side, (local, confidence, filtered_palm) in updated_observations.items():
                     hand_retargeter = hand_retargeters[side]
                     arm_retargeter = arm_retargeters[side]
-                    if hand_retargeter.calibrated and arm_retargeter.calibrated:
+                    if hand_retargeter.calibrated:
                         hand_target = hand_retargeter.solve(local, confidence)
-                        arm_target = arm_retargeter.solve(filtered_palm)
                         robot.set_joint_position_target_index(
                             target=hand_target, joint_ids=hand_retargeter.joint_ids
                         )
+                    if (
+                        not args_cli.hand_only
+                        and arm_retargeter.calibrated
+                        and filtered_palm is not None
+                    ):
+                        arm_target = arm_retargeter.solve(filtered_palm)
                         robot.set_joint_position_target_index(
                             target=arm_target, joint_ids=arm_retargeter.joint_ids
                         )
@@ -646,6 +660,7 @@ def main() -> None:
     if records["time"]:
         metadata = {
             "format": "trex_isaac_keypoint_demo_v2",
+            "retarget_mode": "hand_only" if args_cli.hand_only else "hand_and_arm",
             "simulation_dt": sim_cfg["dt"],
             "record_stride": teleop_cfg["record_stride"],
             "fps": 1.0 / (sim_cfg["dt"] * teleop_cfg["record_stride"]),

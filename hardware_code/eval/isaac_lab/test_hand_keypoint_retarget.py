@@ -5,6 +5,7 @@ import numpy as np
 
 from hand_keypoint_retarget import (
     HandSample,
+    KeypointFilter,
     PalmPose,
     assemble_trex_vector,
     fit_similarity,
@@ -16,6 +17,23 @@ from hand_keypoint_retarget import (
 
 
 class HandKeypointRetargetTest(unittest.TestCase):
+    def test_filter_accepts_landmark_when_depth_returns(self):
+        points = np.zeros((21, 3), dtype=float)
+        points[:, 0] = np.arange(21) * 0.005
+        confidence = np.ones(21)
+        confidence[4] = 0.0
+        keypoint_filter = KeypointFilter(alpha=0.5, min_confidence=0.5, max_jump_m=0.08)
+        self.assertIsNotNone(
+            keypoint_filter.update("right", HandSample(points.copy(), confidence.copy()))
+        )
+
+        recovered = points.copy()
+        recovered[4] = [0.30, 0.10, 0.25]
+        confidence[4] = 1.0
+        result = keypoint_filter.update("right", HandSample(recovered, confidence))
+        self.assertIsNotNone(result)
+        np.testing.assert_allclose(result.xyz[4], recovered[4])
+
     def test_packet_with_confidence(self):
         points = np.arange(84, dtype=float).reshape(21, 4)
         packet = parse_packet(

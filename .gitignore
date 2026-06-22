@@ -36,3 +36,4 @@ tactile_vqvae/plots*/
 training_data/
 checkpoints/
 episode_viz/
+hardware_code/perception/models/
