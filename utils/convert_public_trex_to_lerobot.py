@@ -521,7 +521,7 @@ def main() -> None:
 
     fk = VegaForwardKinematics(Path(args.urdf).expanduser().resolve())
     first_episode = int(selected.iloc[0]["episode_index"])
-    probe_ds = LeRobotDataset(source_repo_id, root=source_root, episodes=[first_episode])
+    probe_ds = LeRobotDataset(source_repo_id, root=source_root, episodes=[first_episode], video_backend="pyav")
     if len(probe_ds) == 0:
         raise RuntimeError(f"Selected episode {first_episode} contains no frames")
     probe = probe_ds[0]
@@ -539,7 +539,6 @@ def main() -> None:
 
     fps = int(info.get("fps", 30))
     assert output_root is not None
-    output_root.mkdir(parents=True, exist_ok=True)
     output = LeRobotDataset.create(
         repo_id=args.repo_id,
         fps=fps,
@@ -553,7 +552,7 @@ def main() -> None:
     for ordinal, (_, row) in enumerate(selected.iterrows(), 1):
         episode_index = int(row["episode_index"])
         caption = _caption(row, args.instruction_override)
-        source_ds = LeRobotDataset(source_repo_id, root=source_root, episodes=[episode_index])
+        source_ds = LeRobotDataset(source_repo_id, root=source_root, episodes=[episode_index], video_backend="pyav")
         pending: deque[dict[str, Any]] = deque()
         episode_states: list[np.ndarray] = []
         episode_targets: list[np.ndarray] = []

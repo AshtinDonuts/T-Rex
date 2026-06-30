@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:4                    # 4 GPUs on the a100 partition
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=256G
+#SBATCH --mem=128G
 #SBATCH --time=48:00:00
 #SBATCH --partition=a100
 #SBATCH --output=%x-%j.out

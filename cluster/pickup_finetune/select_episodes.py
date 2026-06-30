@@ -52,7 +52,7 @@ def select_pickup_rows(rows: pd.DataFrame, count: int, seed: int, max_per_object
     if missing:
         raise ValueError(f"Episode metadata is missing columns: {sorted(missing)}")
     candidates = rows[
-        rows["motor_primitive"].map(normalize_primitive).eq("grasp and lift")
+        rows["motor_primitive"].map(normalize_primitive).str.startswith("grasp and lift")
     ].copy()
     searchable = candidates["object"].fillna("").astype(str) + " " + candidates["caption"].fillna("").astype(str)
     candidates = candidates[~searchable.map(lambda text: bool(EXCLUDE.search(text)))].copy()

@@ -126,7 +126,8 @@ class TRexLeRobotDataset(torch.utils.data.Dataset):
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
             self.ds = LeRobotDataset(
                 repo_id, root=root, episodes=episodes,
-                delta_timestamps=self._build_delta_timestamps())
+                delta_timestamps=self._build_delta_timestamps(),
+                video_backend="pyav")
         accelerator.print(
             f"[LeRobot] {repo_id}: {len(self.ds)} raw frames, {len(self)} samples, "
             f"sample_stride={self.sample_stride}, fps={self.fps}, "
@@ -171,8 +172,8 @@ class TRexLeRobotDataset(torch.utils.data.Dataset):
         train_eps = sorted(perm[n_val:].tolist())
         repo_id = getattr(self.config, "lerobot_repo_id", "") or os.path.basename(self.root.rstrip("/"))
         dt = self._build_delta_timestamps()
-        val_ds = LeRobotDataset(repo_id, root=self.root, episodes=val_eps, delta_timestamps=dt)
-        self.ds = LeRobotDataset(repo_id, root=self.root, episodes=train_eps, delta_timestamps=dt)
+        val_ds = LeRobotDataset(repo_id, root=self.root, episodes=val_eps, delta_timestamps=dt, video_backend="pyav")
+        self.ds = LeRobotDataset(repo_id, root=self.root, episodes=train_eps, delta_timestamps=dt, video_backend="pyav")
         self.accelerator.print(f"[LeRobot] train/val split: {len(train_eps)}/{len(val_eps)} episodes")
         val = copy.copy(self)
         val.ds = val_ds

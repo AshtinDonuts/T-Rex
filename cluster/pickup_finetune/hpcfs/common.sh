@@ -34,6 +34,10 @@ fi
 module load Anaconda3/2025.06-1
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV}"
+# hpcfs non-interactive shells may keep base python on PATH after conda activate.
+if [[ -x "${CONDA_ENV}/bin/python" ]]; then
+  export PATH="${CONDA_ENV}/bin:${PATH}"
+fi
 
 # Strict mode after conda activation (conda deactivate scripts don't handle -u cleanly).
 set -euo pipefail
