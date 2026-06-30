@@ -141,10 +141,21 @@ class KeypointFilter:
         self._state: dict[str, np.ndarray] = {}
         self._valid_state: dict[str, np.ndarray] = {}
 
-    def update(self, side: str, sample: HandSample) -> HandSample | None:
+    def rejection_reason(self, sample: HandSample) -> str | None:
+        """Return a human-readable reason when ``update`` would reject this sample."""
         valid = sample.confidence >= self.min_confidence
-        if valid.sum() < 16 or not valid[[WRIST, 5, 9, 13, 17]].all():
+        if valid.sum() < 16:
+            return f"only {int(valid.sum())}/21 landmarks above min confidence"
+        required = [WRIST, 5, 9, 13, 17]
+        if not valid[required].all():
+            missing = [index for index in required if not valid[index]]
+            return f"wrist/MCP landmarks missing or low confidence at indices {missing}"
+        return None
+
+    def update(self, side: str, sample: HandSample) -> HandSample | None:
+        if self.rejection_reason(sample) is not None:
             return None
+        valid = sample.confidence >= self.min_confidence
         previous = self._state.get(side)
         current = sample.xyz.copy()
         if previous is not None:
@@ -160,6 +171,13 @@ class KeypointFilter:
         self._state[side] = current
         self._valid_state[side] = valid.copy()
         return HandSample(current.copy(), sample.confidence.copy())
+
+
+def wrist_distance_m(sample: HandSample) -> float:
+    """Return wrist depth along the camera Z axis in meters, or NaN when invalid."""
+    if sample.confidence[WRIST] <= 0.0 or not np.isfinite(sample.xyz[WRIST]).all():
+        return float("nan")
+    return float(sample.xyz[WRIST, 2])
 
 
 def palm_normalize(sample: HandSample) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
@@ -213,6 +231,22 @@ def palm_pose(sample: HandSample) -> PalmPose:
     return PalmPose(center, rotation)
 
 
+def wrist_pose(sample: HandSample) -> PalmPose:
+    """Estimate wrist position and MCP-derived palm orientation in the camera frame."""
+    _, wrist, rotation, _ = palm_normalize(sample)
+    return PalmPose(wrist, rotation)
+
+
+def align_camera_to_robot_rotation(
+    wrist_rotation_camera: np.ndarray, ee_rotation_robot: np.ndarray
+) -> np.ndarray:
+    """Return R_cam->rob that maps the calibration wrist frame onto the robot EEF frame."""
+    return project_rotation(
+        np.asarray(ee_rotation_robot, dtype=np.float64)
+        @ np.asarray(wrist_rotation_camera, dtype=np.float64).T
+    )
+
+
 def project_rotation(matrix: np.ndarray) -> np.ndarray:
     """Project a noisy matrix onto SO(3)."""
     u, _, vt = np.linalg.svd(matrix)
@@ -254,15 +288,19 @@ class PalmPoseFilter:
         self.max_jump_rad = max_jump_rad
         self._state: dict[str, PalmPose] = {}
 
+    def last(self, side: str) -> PalmPose | None:
+        """Return the most recent accepted palm pose for ``side``, if any."""
+        return self._state.get(side)
+
     def update(self, side: str, pose: PalmPose) -> PalmPose | None:
         previous = self._state.get(side)
         if previous is None:
             self._state[side] = pose
             return pose
         if np.linalg.norm(pose.position - previous.position) > self.max_jump_m:
-            return None
+            return previous
         if _rotation_angle(previous.rotation.T @ pose.rotation) > self.max_jump_rad:
-            return None
+            return previous
         filtered = PalmPose(
             self.position_alpha * pose.position + (1.0 - self.position_alpha) * previous.position,
             _interpolate_rotation(previous.rotation, pose.rotation, self.rotation_alpha),

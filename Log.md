@@ -1,3 +1,7 @@
+## Jun 30
+
+Multiview D405 capture: use `POEM-v2/tool/record_d405.py` (`python -m tool.record_d405 --preview` from the POEM-v2 repo).
+
 ## Jun 22 1700
 
 Dealing with:

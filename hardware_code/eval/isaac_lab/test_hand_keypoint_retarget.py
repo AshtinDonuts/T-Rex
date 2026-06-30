@@ -7,12 +7,15 @@ from hand_keypoint_retarget import (
     HandSample,
     KeypointFilter,
     PalmPose,
+    align_camera_to_robot_rotation,
     assemble_trex_vector,
     fit_similarity,
     palm_normalize,
     palm_pose,
     parse_packet,
     relative_pose_target,
+    wrist_distance_m,
+    wrist_pose,
 )
 
 
@@ -43,6 +46,35 @@ class HandKeypointRetargetTest(unittest.TestCase):
         self.assertEqual(packet.frame_id, "head_camera")
         np.testing.assert_allclose(packet.hands["right"].xyz, points[:, :3])
         np.testing.assert_allclose(packet.hands["right"].confidence, points[:, 3])
+
+    def test_wrist_distance_uses_camera_z(self):
+        points = np.zeros((21, 3), dtype=float)
+        points[0] = [0.04, -0.02, 0.35]
+        confidence = np.zeros(21)
+        confidence[0] = 0.9
+        self.assertAlmostEqual(wrist_distance_m(HandSample(points, confidence)), 0.35)
+        self.assertTrue(np.isnan(wrist_distance_m(HandSample(points, np.zeros(21)))))
+
+    def test_wrist_pose_uses_wrist_origin(self):
+        points = np.zeros((21, 3), dtype=float)
+        points[5] = [0.04, 0.08, 0.0]
+        points[9] = [0.0, 0.10, 0.0]
+        points[13] = [-0.02, 0.08, 0.0]
+        points[17] = [-0.04, 0.06, 0.0]
+        sample = HandSample(points, np.ones(21))
+        palm = palm_pose(sample)
+        wrist = wrist_pose(sample)
+        np.testing.assert_allclose(wrist.position, np.zeros(3))
+        np.testing.assert_allclose(wrist.rotation, palm.rotation)
+        self.assertFalse(np.allclose(palm.position, wrist.position))
+
+    def test_align_camera_to_robot_rotation(self):
+        wrist_rotation = np.eye(3)
+        ee_rotation = np.array(
+            [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]], dtype=float
+        )
+        camera_to_robot = align_camera_to_robot_rotation(wrist_rotation, ee_rotation)
+        np.testing.assert_allclose(camera_to_robot @ wrist_rotation, ee_rotation, atol=1e-10)
 
     def test_palm_normalization_is_similarity_invariant(self):
         points = np.zeros((21, 3), dtype=float)

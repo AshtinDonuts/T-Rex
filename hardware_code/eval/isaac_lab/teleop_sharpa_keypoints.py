@@ -59,11 +59,13 @@ from hand_keypoint_retarget import (
     assemble_trex_vector,
     average_rotation,
     fit_similarity,
-    palm_pose,
+    align_camera_to_robot_rotation,
     palm_normalize,
     quaternion_wxyz_to_matrix,
     relative_pose_target,
     tracked_points,
+    wrist_distance_m,
+    wrist_pose,
 )
 
 
@@ -102,11 +104,29 @@ def set_named_positions(robot: Articulation, mapping: dict[str, float]) -> None:
     robot.set_joint_position_target_index(target=positions)
 
 
-def build_rest_pose_mapping(robot_cfg: dict, required_sides: list[str]) -> dict[str, float]:
-    """Joint targets for the fixed base, arms, head, wheels, and any non-retargeted hands."""
+def build_initial_pose_mapping(robot_cfg: dict) -> dict[str, float]:
+    """Joint targets used when placing the robot before teleop starts."""
     rest_pose = {}
     rest_pose.update(dict(zip(robot_cfg["left_arm_joints"], robot_cfg["left_arm_initial"])))
     rest_pose.update(dict(zip(robot_cfg["right_arm_joints"], robot_cfg["right_arm_initial"])))
+    rest_pose.update(dict(zip(["torso_j1", "torso_j2", "torso_j3"], robot_cfg["torso_initial"])))
+    rest_pose.update(dict(zip(["head_j1", "head_j2", "head_j3"], robot_cfg["head_initial"])))
+    rest_pose.update({name: 0.0 for name in WHEEL_JOINTS})
+    rest_pose.update({name: 0.0 for name in robot_cfg["left_hand_joints"]})
+    rest_pose.update({name: 0.0 for name in robot_cfg["right_hand_joints"]})
+    return rest_pose
+
+
+def build_hold_pose_mapping(
+    robot_cfg: dict, required_sides: list[str], moving_arm_sides: list[str]
+) -> dict[str, float]:
+    """Joint targets that should remain fixed while keypoint teleop runs."""
+    rest_pose = {}
+    for side in ("left", "right"):
+        if side not in moving_arm_sides:
+            rest_pose.update(
+                dict(zip(robot_cfg[f"{side}_arm_joints"], robot_cfg[f"{side}_arm_initial"]))
+            )
     rest_pose.update(dict(zip(["torso_j1", "torso_j2", "torso_j3"], robot_cfg["torso_initial"])))
     rest_pose.update(dict(zip(["head_j1", "head_j2", "head_j3"], robot_cfg["head_initial"])))
     rest_pose.update({name: 0.0 for name in WHEEL_JOINTS})
@@ -134,30 +154,34 @@ def hold_joints_at_targets(
 
 
 def make_actuator_cfg(hand_only: bool, required_sides: list[str]) -> dict[str, ImplicitActuatorCfg]:
-    if not hand_only:
-        return {
-            "all": ImplicitActuatorCfg(
-                joint_names_expr=[".*"], stiffness=400.0, damping=40.0, effort_limit_sim=200.0
-            )
-        }
-    body_patterns = [
+    moving_arm_sides = [] if hand_only else required_sides
+    fixed_patterns = [
         "torso_.*",
         "head_.*",
-        "L_arm_j[1-7]",
-        "R_arm_j[1-7]",
         ".*_wheel_j.*",
     ]
     for side in ("left", "right"):
+        arm_pattern = "L_arm_j[1-7]" if side == "left" else "R_arm_j[1-7]"
+        if side not in moving_arm_sides:
+            fixed_patterns.append(arm_pattern)
         if side not in required_sides:
-            body_patterns.append(f"{side}_.*")
+            fixed_patterns.append(f"{side}_.*")
     actuators = {
-        "body": ImplicitActuatorCfg(
-            joint_names_expr=body_patterns,
+        "fixed_body": ImplicitActuatorCfg(
+            joint_names_expr=fixed_patterns,
             stiffness=10000.0,
             damping=1000.0,
             effort_limit_sim=10000.0,
         ),
     }
+    for side in moving_arm_sides:
+        arm_pattern = "L_arm_j[1-7]" if side == "left" else "R_arm_j[1-7]"
+        actuators[f"{side}_arm"] = ImplicitActuatorCfg(
+            joint_names_expr=[arm_pattern],
+            stiffness=400.0,
+            damping=40.0,
+            effort_limit_sim=200.0,
+        )
     for side in required_sides:
         actuators[f"{side}_hand"] = ImplicitActuatorCfg(
             joint_names_expr=[f"{side}_.*"],
@@ -305,7 +329,7 @@ class HandRetargeter:
 
 
 class ArmRetargeter:
-    """Map relative vision palm poses to one DexMate EEF and solve its 7-DoF IK."""
+    """Map relative vision wrist poses to one DexMate EEF and solve its 7-DoF IK."""
 
     def __init__(
         self,
@@ -315,15 +339,18 @@ class ArmRetargeter:
         ee_body_id: int,
         cfg: dict,
         camera_to_robot_rotation: np.ndarray,
+        *,
+        auto_align_camera: bool,
     ):
         self.side = side
         self.robot = robot
         self.joint_ids = joint_ids
         self.ee_body_id = ee_body_id
         self.cfg = cfg
-        self.camera_to_robot_rotation = camera_to_robot_rotation
+        self.camera_to_robot_rotation = np.asarray(camera_to_robot_rotation, dtype=np.float64)
+        self.auto_align_camera = auto_align_camera
         self.calibration_samples: list[PalmPose] = []
-        self.initial_palm: PalmPose | None = None
+        self.initial_wrist: PalmPose | None = None
         self.initial_ee: PalmPose | None = None
         self.target_joint_pos = robot.data.joint_pos.torch[:, joint_ids].clone()
         self.default_joint_pos = self.target_joint_pos.clone()
@@ -333,7 +360,7 @@ class ArmRetargeter:
 
     @property
     def calibrated(self) -> bool:
-        return self.initial_palm is not None
+        return self.initial_wrist is not None
 
     def observe_calibration(self, pose: PalmPose) -> bool:
         if self.calibrated:
@@ -345,17 +372,29 @@ class ArmRetargeter:
         initial_rotation = average_rotation([sample.rotation for sample in self.calibration_samples])
         ee_pose = self.robot.data.body_pose_w.torch[0, self.ee_body_id]
         ee_rotation = matrix_from_quat(ee_pose[3:7].unsqueeze(0))[0].detach().cpu().numpy()
-        self.initial_palm = PalmPose(initial_position, initial_rotation)
+        self.initial_wrist = PalmPose(initial_position, initial_rotation)
         self.initial_ee = PalmPose(ee_pose[:3].detach().cpu().numpy(), ee_rotation)
+        if self.auto_align_camera:
+            self.camera_to_robot_rotation = align_camera_to_robot_rotation(
+                self.initial_wrist.rotation, self.initial_ee.rotation
+            )
         self.target_pose = self.initial_ee
-        print(f"{self.side} arm calibration complete at EEF {self.initial_ee.position.round(3)}")
+        print(
+            f"{self.side} DexMate arm calibrated: EEF {self.initial_ee.position.round(3)}, "
+            f"wrist depth {self.initial_wrist.position[2]:.3f} m"
+            + (
+                f", auto camera->robot rotation"
+                if self.auto_align_camera
+                else ", yaml camera->robot rotation"
+            )
+        )
         return True
 
     def solve(self, pose: PalmPose) -> torch.Tensor:
-        assert self.initial_palm is not None and self.initial_ee is not None
+        assert self.initial_wrist is not None and self.initial_ee is not None
         desired = relative_pose_target(
             pose,
-            self.initial_palm,
+            self.initial_wrist,
             self.initial_ee,
             self.camera_to_robot_rotation,
             float(self.cfg["arm_translation_scale"]),
@@ -415,13 +454,15 @@ class ArmRetargeter:
         return matrix
 
     def calibration_dict(self) -> dict | None:
-        if self.initial_palm is None or self.initial_ee is None:
+        if self.initial_wrist is None or self.initial_ee is None:
             return None
         return {
-            "initial_palm_position": self.initial_palm.position.tolist(),
-            "initial_palm_rotation": self.initial_palm.rotation.tolist(),
+            "initial_wrist_position": self.initial_wrist.position.tolist(),
+            "initial_wrist_rotation": self.initial_wrist.rotation.tolist(),
             "initial_ee_position": self.initial_ee.position.tolist(),
             "initial_ee_rotation": self.initial_ee.rotation.tolist(),
+            "camera_to_robot_rotation": self.camera_to_robot_rotation.tolist(),
+            "auto_align_camera": self.auto_align_camera,
         }
 
 
@@ -538,18 +579,18 @@ def main() -> None:
     }
     sim.reset()
 
-    rest_pose = build_rest_pose_mapping(robot_cfg, required_sides)
-    initial = dict(rest_pose)
-    initial.update({name: 0.0 for name in robot_cfg["left_hand_joints"] + robot_cfg["right_hand_joints"]})
+    moving_arm_sides = [] if args_cli.hand_only else required_sides
+    rest_pose = build_hold_pose_mapping(robot_cfg, required_sides, moving_arm_sides)
+    initial = build_initial_pose_mapping(robot_cfg)
     set_named_positions(robot, initial)
     fixed_joint_ids = exact_ids(robot, list(rest_pose.keys()))
     fixed_joint_targets = joint_target_from_mapping(robot, rest_pose)[:, fixed_joint_ids]
 
     for _ in range(sim_cfg["settle_steps"]):
-        if args_cli.hand_only:
+        if fixed_joint_ids:
             hold_joints_at_targets(robot, fixed_joint_ids, fixed_joint_targets, before_sim_write=True)
         robot.write_data_to_sim()
-        if args_cli.hand_only:
+        if fixed_joint_ids:
             hold_joints_at_targets(robot, fixed_joint_ids, fixed_joint_targets, before_sim_write=False)
         if object_asset is not None:
             object_asset.write_data_to_sim()
@@ -575,7 +616,13 @@ def main() -> None:
         arm_joint_ids = exact_ids(robot, robot_cfg[f"{side}_arm_joints"])
         ee_body_id = exact_ids(robot, [robot_cfg[f"{side}_ee_body"]], bodies=True)[0]
         arm_retargeters[side] = ArmRetargeter(
-            side, robot, arm_joint_ids, ee_body_id, teleop_cfg, camera_to_robot_rotation
+            side,
+            robot,
+            arm_joint_ids,
+            ee_body_id,
+            teleop_cfg,
+            camera_to_robot_rotation,
+            auto_align_camera=bool(teleop_cfg.get("arm_align_camera_at_calibration", True)),
         )
 
     receiver = UdpKeypointReceiver(
@@ -599,8 +646,16 @@ def main() -> None:
             f"Holding {len(fixed_joint_ids)} body joints at rest pose "
             f"(kinematic lock + high-stiffness actuators)."
         )
+    else:
+        print(
+            f"Holding {len(fixed_joint_ids)} non-retargeted body joints at rest pose "
+            "while required arm(s) follow palm motion."
+        )
     calibration_frames = int(teleop_cfg["calibration_frames"])
     calibration_countdown_s = float(teleop_cfg.get("calibration_countdown_s", 3.0))
+    calibration_tracking_timeout_s = float(
+        teleop_cfg.get("calibration_tracking_timeout_s", teleop_cfg["timeout_s"])
+    )
     print(
         f"CALIBRATION WAITING: show {', '.join(required_sides)} hand(s). A "
         f"{calibration_countdown_s:g}s countdown starts after all are tracked."
@@ -609,10 +664,17 @@ def main() -> None:
         f"Then hold every required hand OPEN and STILL for {calibration_frames} valid frames "
         f"(~{calibration_frames / 30.0:.1f}s at 30 Hz). Recording starts after completion."
     )
+    if len(required_sides) > 1:
+        print(
+            "Tip: pass --left-only or --right-only for one-hand testing; "
+            "pass --hand-only to fix DexMate arms while retargeting Wave fingers."
+        )
 
     records: dict[str, list] = {
         "time": [], "tracker_timestamp": [], "keypoint_age": [], "input_valid": [],
         "left_keypoints_palm_normalized": [], "right_keypoints_palm_normalized": [],
+        "left_wrist_distance_raw_m": [], "right_wrist_distance_raw_m": [],
+        "left_wrist_distance_m": [], "right_wrist_distance_m": [],
         "left_palm_pose_camera": [], "right_palm_pose_camera": [],
         "left_arm_target_pose": [], "right_arm_target_pose": [],
         "left_arm_actual_pose": [], "right_arm_actual_pose": [],
@@ -634,8 +696,14 @@ def main() -> None:
     last_packet_timestamp = np.nan
     last_sequence = -1
     last_diagnostic_report = 0.0
+    last_calibration_wait_report = 0.0
+    calibration_wait_report_interval_s = float(
+        teleop_cfg.get("calibration_wait_report_interval_s", 5.0)
+    )
+    last_filter_rejection: dict[str, str] = {}
     last_valid_input_time: dict[str, float | None] = {"left": None, "right": None}
     latest_observations: dict[str, tuple[np.ndarray, np.ndarray, PalmPose | None]] = {}
+    latest_wrist_distance: dict[str, tuple[float, float]] = {}
     calibration_ready_since: float | None = None
     calibration_capture_since: float | None = None
     calibration_countdown_value: int | None = None
@@ -651,9 +719,50 @@ def main() -> None:
     frozen_joint_targets: torch.Tensor | None = None
     all_joint_ids = list(range(robot.num_joints))
 
+    def describe_calibration_wait(now: float, sequence: int, transport_age: float) -> str:
+        side_status = []
+        for side in required_sides:
+            timestamp = last_valid_input_time[side]
+            if timestamp is None:
+                detail = "never tracked"
+            elif now - timestamp > calibration_tracking_timeout_s:
+                detail = f"stale for {now - timestamp:.1f}s"
+            elif side in latest_observations:
+                detail = "tracked"
+            else:
+                detail = "recent packet did not pass filters"
+            rejection = last_filter_rejection.get(side)
+            if rejection:
+                detail = f"{detail}; last reject: {rejection}"
+            side_status.append(f"{side}={detail}")
+        packet_status = (
+            f"last UDP packet {transport_age:.2f}s ago (seq={sequence})"
+            if sequence >= 0
+            else "no UDP packets received yet"
+        )
+        return f"{packet_status}; {', '.join(side_status)}"
+
+    def fresh_required_observations(
+        now: float,
+    ) -> dict[str, tuple[np.ndarray, np.ndarray, PalmPose | None]] | None:
+        observations = {}
+        for side in required_sides:
+            timestamp = last_valid_input_time[side]
+            if (
+                timestamp is None
+                or now - timestamp > calibration_tracking_timeout_s
+                or side not in latest_observations
+            ):
+                return None
+            local, confidence, filtered_palm = latest_observations[side]
+            if not args_cli.hand_only and filtered_palm is None:
+                return None
+            observations[side] = (local, confidence, filtered_palm)
+        return observations
+
     try:
         while simulation_app.is_running() and step < max_steps:
-            packet, sequence, _transport_age, error = receiver.latest()
+            packet, sequence, transport_age, error = receiver.latest()
             new_packet = packet is not None and sequence != last_sequence
             updated_observations: dict[str, tuple[np.ndarray, np.ndarray, PalmPose | None]] = {}
             if error and step % 120 == 0:
@@ -668,82 +777,104 @@ def main() -> None:
                     )
                     new_packet = False
                 for side, sample in (packet.hands.items() if new_packet else ()):
+                    raw_wrist_distance = wrist_distance_m(sample)
+                    rejection = keypoint_filter.rejection_reason(sample)
                     filtered = keypoint_filter.update(side, sample)
                     if filtered is None:
+                        if rejection:
+                            last_filter_rejection[side] = rejection
                         continue
+                    last_filter_rejection.pop(side, None)
                     try:
                         local, _, _, _ = palm_normalize(filtered)
-                    except ValueError:
+                    except ValueError as exc:
+                        last_filter_rejection[side] = str(exc)
                         continue
                     try:
-                        filtered_palm = palm_filter.update(side, palm_pose(filtered))
-                    except ValueError:
-                        filtered_palm = None
+                        filtered_palm = palm_filter.update(side, wrist_pose(filtered))
+                    except ValueError as exc:
+                        filtered_palm = palm_filter.last(side)
+                        if filtered_palm is None:
+                            last_filter_rejection[side] = str(exc)
+                            continue
                     if filtered_palm is None and not args_cli.hand_only:
                         continue
                     latest_observations[side] = (local, filtered.confidence, filtered_palm)
                     updated_observations[side] = (local, filtered.confidence, filtered_palm)
+                    latest_wrist_distance[side] = (
+                        raw_wrist_distance,
+                        wrist_distance_m(filtered),
+                    )
                 update_time = time.monotonic()
                 for side in updated_observations:
                     last_valid_input_time[side] = update_time
 
-                if not recording:
-                    all_required_visible = all(side in updated_observations for side in required_sides)
-                    if all_required_visible and calibration_ready_since is None:
-                        calibration_ready_since = update_time
-                        calibration_countdown_value = None
-                        print(
-                            "CALIBRATION HANDS DETECTED: keep all required hands open and still; "
-                            "countdown starting."
-                        )
-
-                    if all_required_visible and calibration_ready_since is not None:
-                        countdown_elapsed = update_time - calibration_ready_since
-                        if countdown_elapsed < calibration_countdown_s:
-                            remaining = max(
-                                1, int(math.ceil(calibration_countdown_s - countdown_elapsed))
-                            )
-                            if remaining != calibration_countdown_value:
-                                print(f"CALIBRATION STARTS IN {remaining}...")
-                                calibration_countdown_value = remaining
-                        else:
-                            if calibration_capture_since is None:
-                                calibration_capture_since = update_time
-                                print(
-                                    "CALIBRATION CAPTURE STARTED: HOLD OPEN + STILL until completion."
-                                )
-                            if calibration_paused:
-                                print("CALIBRATION RESUMED: all required hands tracked.")
-                                calibration_paused = False
-                            for side in required_sides:
-                                local, confidence, filtered_palm = updated_observations[side]
-                                hand_retargeters[side].observe_calibration(local, confidence)
-                                if not args_cli.hand_only and filtered_palm is not None:
-                                    arm_retargeters[side].observe_calibration(filtered_palm)
-                            captured = min(
-                                min(len(hand_retargeters[side].calibration_samples), calibration_frames)
-                                for side in required_sides
-                            )
-                            if captured > calibration_last_progress and (
-                                captured == 1
-                                or captured % 5 == 0
-                                or captured == calibration_frames
-                            ):
-                                elapsed = update_time - calibration_capture_since
-                                print(
-                                    f"CALIBRATION PROGRESS: {captured}/{calibration_frames} valid "
-                                    f"frames ({elapsed:.1f}s elapsed)."
-                                )
-                                calibration_last_progress = captured
-                    elif calibration_capture_since is None and calibration_ready_since is not None:
-                        print("CALIBRATION COUNTDOWN RESET: a required hand was lost.")
-                        calibration_ready_since = None
-                        calibration_countdown_value = None
-                    elif calibration_capture_since is not None and not calibration_paused:
-                        print("CALIBRATION PAUSED: required hand lost; show it again to continue.")
-                        calibration_paused = True
-
             now = time.monotonic()
+            if not recording:
+                if (
+                    calibration_ready_since is None
+                    and now - last_calibration_wait_report >= calibration_wait_report_interval_s
+                ):
+                    print(f"CALIBRATION WAITING: {describe_calibration_wait(now, sequence, transport_age)}")
+                    last_calibration_wait_report = now
+
+                required_observations = fresh_required_observations(now)
+                all_required_visible = required_observations is not None
+                if all_required_visible and calibration_ready_since is None:
+                    calibration_ready_since = now
+                    calibration_countdown_value = None
+                    print(
+                        "CALIBRATION HANDS DETECTED: keep all required hands open and still; "
+                        "countdown starting."
+                    )
+
+                if all_required_visible and calibration_ready_since is not None:
+                    countdown_elapsed = now - calibration_ready_since
+                    if countdown_elapsed < calibration_countdown_s:
+                        remaining = max(
+                            1, int(math.ceil(calibration_countdown_s - countdown_elapsed))
+                        )
+                        if remaining != calibration_countdown_value:
+                            print(f"CALIBRATION STARTS IN {remaining}...")
+                            calibration_countdown_value = remaining
+                    else:
+                        if calibration_capture_since is None:
+                            calibration_capture_since = now
+                            print(
+                                "CALIBRATION CAPTURE STARTED: HOLD OPEN + STILL until completion."
+                            )
+                        if calibration_paused:
+                            print("CALIBRATION RESUMED: all required hands tracked.")
+                            calibration_paused = False
+                        assert required_observations is not None
+                        for side in required_sides:
+                            local, confidence, filtered_palm = required_observations[side]
+                            hand_retargeters[side].observe_calibration(local, confidence)
+                            if not args_cli.hand_only and filtered_palm is not None:
+                                arm_retargeters[side].observe_calibration(filtered_palm)
+                        captured = min(
+                            min(len(hand_retargeters[side].calibration_samples), calibration_frames)
+                            for side in required_sides
+                        )
+                        if captured > calibration_last_progress and (
+                            captured == 1
+                            or captured % 5 == 0
+                            or captured == calibration_frames
+                        ):
+                            elapsed = now - calibration_capture_since
+                            print(
+                                f"CALIBRATION PROGRESS: {captured}/{calibration_frames} valid "
+                                f"frames ({elapsed:.1f}s elapsed)."
+                            )
+                            calibration_last_progress = captured
+                elif calibration_capture_since is None and calibration_ready_since is not None:
+                    print("CALIBRATION COUNTDOWN RESET: a required hand was lost.")
+                    calibration_ready_since = None
+                    calibration_countdown_value = None
+                elif calibration_capture_since is not None and not calibration_paused:
+                    print("CALIBRATION PAUSED: required hand lost; show it again to continue.")
+                    calibration_paused = True
+
             valid_ages = {
                 side: now - timestamp if timestamp is not None else np.inf
                 for side, timestamp in last_valid_input_time.items()
@@ -836,7 +967,7 @@ def main() -> None:
                 hold_joints_at_targets(
                     robot, all_joint_ids, frozen_joint_targets, before_sim_write=True
                 )
-            elif args_cli.hand_only:
+            elif fixed_joint_ids:
                 hold_joints_at_targets(
                     robot, fixed_joint_ids, fixed_joint_targets, before_sim_write=True
                 )
@@ -849,7 +980,7 @@ def main() -> None:
                 hold_joints_at_targets(
                     robot, all_joint_ids, frozen_joint_targets, before_sim_write=False
                 )
-            elif args_cli.hand_only:
+            elif fixed_joint_ids:
                 hold_joints_at_targets(
                     robot, fixed_joint_ids, fixed_joint_targets, before_sim_write=False
                 )
@@ -872,6 +1003,12 @@ def main() -> None:
                 records["right_keypoints_palm_normalized"].append(
                     latest_observations.get("right", (nan_keypoints, None, None))[0]
                 )
+                for side in ("left", "right"):
+                    raw_distance, filtered_distance = latest_wrist_distance.get(
+                        side, (np.nan, np.nan)
+                    )
+                    records[f"{side}_wrist_distance_raw_m"].append(raw_distance)
+                    records[f"{side}_wrist_distance_m"].append(filtered_distance)
                 records["left_palm_pose_camera"].append(
                     pose_matrix(latest_observations.get("left", (None, None, None))[2])
                 )
@@ -939,12 +1076,21 @@ def main() -> None:
             "record_stride": teleop_cfg["record_stride"],
             "fps": 1.0 / (sim_cfg["dt"] * teleop_cfg["record_stride"]),
             "keypoint_frame_id": teleop_cfg["keypoint_frame_id"],
+            "wrist_distance_fields": {
+                "left_wrist_distance_m": "Filtered wrist camera-frame Z depth (m).",
+                "right_wrist_distance_m": "Filtered wrist camera-frame Z depth (m).",
+                "left_wrist_distance_raw_m": "Unfiltered UDP wrist camera-frame Z depth (m).",
+                "right_wrist_distance_raw_m": "Unfiltered UDP wrist camera-frame Z depth (m).",
+            },
             "state_action_order": [
                 *robot_cfg["left_arm_joints"], *robot_cfg["left_hand_joints"],
                 *robot_cfg["right_arm_joints"], *robot_cfg["right_hand_joints"],
             ],
             "tracked_keypoint_indices": TRACKED_INDICES.tolist(),
-            "camera_to_robot_rotation": camera_to_robot_rotation.tolist(),
+            "camera_to_robot_rotation": {
+                side: arm_retargeters[side].camera_to_robot_rotation.tolist()
+                for side in ("left", "right")
+            },
             "calibration": {
                 side: {
                     "hand": hand_retargeters[side].calibration_dict(),

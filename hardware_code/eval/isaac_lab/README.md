@@ -77,9 +77,11 @@ also removes the table and rigid cube, leaving only the robot and ground plane.
 Stop the hand-only run in Terminal 2 before starting this test; do not run 3A
 and 3B simultaneously. Keep the D405 sender running in Terminal 1.
 
-First calibrate `camera_to_robot_quaternion_wxyz` for the physical D405 mount
-and verify `arm_workspace` in `trex_isaac.yaml`. The identity default is only a
-safe starting point for hand-only testing; arm motion uses metric camera XYZ.
+First calibrate by holding each required hand near the matching DexMate flange
+during the countdown; the sim learns a per-arm camera-to-robot rotation from the
+paired wrist and EEF poses. Override with `arm_align_camera_at_calibration: false`
+and set `camera_to_robot_quaternion_wxyz` manually if needed. Verify
+`arm_workspace` in `trex_isaac.yaml`.
 
 ```bash
 hardware_code/eval/isaac_lab/run_keypoint_teleop.sh \
@@ -88,7 +90,9 @@ hardware_code/eval/isaac_lab/run_keypoint_teleop.sh \
 ```
 
 Palm translation/orientation drives each 7-DoF arm; palm-normalized landmarks
-drive the Wave fingers.
+drive the Wave fingers. Arm retargeting uses the tracked **wrist position** and
+MCP-derived **palm orientation** in the D405 frame, mapped relatively onto
+`left_hand_flange` / `right_hand_flange`.
 
 ### 4. Check both recordings
 

@@ -4,9 +4,7 @@ This folder is a self-contained one-node Slurm workflow for post-training T-Rex
 on 64 selected public `grasp and lift` episodes. It uses four A100 GPUs through
 Accelerate + DeepSpeed ZeRO-2. It does not modify or call `scripts/train.sh`.
 
-The experiment is deliberately narrow: improve pickup-like reaching, hand
-closure, and upward motion over the raw midtrain checkpoint in the fixed Isaac
-scene. It is not intended to establish robust pickup success.
+Experiment aim: show a bare-minimum improvement in pickup-like reaching, hand closure, and upward motion over the raw midtrain checkpoint. It is not intended to establish robust pickup success.
 
 ## 1. Configure the cluster
 
@@ -31,7 +29,7 @@ Important paths in `cluster.env`:
 Budget at least 300 GB of scratch space initially. The actual required shard
 size is reported before download.
 
-## 2. Select, review, and convert 
+## 2. Select, review, and convert
 
 The first run downloads metadata only and writes deterministic manifests:
 
@@ -107,7 +105,8 @@ fine-tuning gains at least one level in two of three matched seeds.
 ## Notes
 
 - Four GPUs on one node still use distributed data parallelism; only multi-node
-  rendezvous is unnecessary.
+rendezvous is unnecessary.
 - `TREX_CLUSTER_ENV=/other/path/env` can override the default `cluster.env`.
 - W&B defaults to offline mode. Set `WANDB_MODE=online` only after configuring
-  credentials outside these scripts.
+credentials outside these scripts.
+

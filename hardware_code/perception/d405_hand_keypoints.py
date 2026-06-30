@@ -22,6 +22,7 @@ HAND_CONNECTIONS = (
     (5, 9), (9, 13), (13, 17),
 )
 FINGERTIP_INDICES = (4, 8, 12, 16, 20)
+REQUIRED_LANDMARK_INDICES = (0, 5, 9, 13, 17)
 
 
 def robust_depth_m(
@@ -286,6 +287,8 @@ def main() -> None:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2,
                     )
                 if valid_count < args.min_valid_landmarks:
+                    continue
+                if not all(keypoints[index, 3] > 0.0 for index in REQUIRED_LANDMARK_INDICES):
                     continue
                 # If duplicate labels occur, retain the higher-confidence detection.
                 if side not in selected_scores or category.score > selected_scores[side]:

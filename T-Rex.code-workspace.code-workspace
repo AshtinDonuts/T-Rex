@@ -2,6 +2,9 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "../POEM-v2"
 		}
 	],
 	"settings": {}

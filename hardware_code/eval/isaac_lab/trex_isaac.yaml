@@ -37,14 +37,15 @@ keypoint_teleop:
   max_palm_jump_rad: 0.7
   calibration_countdown_s: 3.0
   calibration_frames: 30
-  # Rotation from the keypoint camera frame into the robot base frame. This
-  # Identity is sufficient for hand-only testing. Calibrate this D405-camera
-  # to robot-base rotation before enabling arm retargeting.
+  # Fallback rotation from the D405 frame into the robot base frame when
+  # arm_align_camera_at_calibration is false. Otherwise each arm learns this
+  # from the paired wrist/EEF poses captured during calibration.
   camera_to_robot_quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]
+  arm_align_camera_at_calibration: true
   arm_translation_scale: 1.0
   arm_ik_damping: 0.05
   arm_posture_regularization: 0.002
-  arm_orientation_weight: 0.35
+  arm_orientation_weight: 1.0
   arm_max_joint_step: 0.04
   arm_target_smoothing: 0.4
   arm_workspace:
